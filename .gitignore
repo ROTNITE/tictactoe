@@ -1,0 +1,12 @@
+# Qt / CMake / build artifacts
+build/
+CMakeFiles/
+CMakeCache.txt
+*.user
+*.pro.user*
+*.autosave
+
+# Qt Creator / clangd cache
+.qtc_clangd/
+
+tictactoe/

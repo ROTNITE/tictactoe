@@ -1,0 +1,582 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1100</width>
+    <height>700</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Крестики-нолики с ИИ (минимакс)</string>
+  </property>
+  <widget class="QWidget" name="centralwidget">
+   <layout class="QHBoxLayout" name="horizontalLayout">
+    <property name="spacing">
+     <number>16</number>
+    </property>
+    <property name="margin">
+     <number>16</number>
+    </property>
+
+    
+    <item>
+     <widget class="QWidget" name="boardWidget">
+      <layout class="QGridLayout" name="gridLayoutBoard">
+       <property name="spacing">
+        <number>8</number>
+       </property>
+       <property name="margin">
+        <number>0</number>
+       </property>
+      </layout>
+     </widget>
+    </item>
+
+    
+    <item>
+     <widget class="QGroupBox" name="groupBoxControls">
+      <property name="title">
+       <string>Управление</string>
+      </property>
+      <layout class="QVBoxLayout" name="verticalLayoutControls">
+       <property name="spacing">
+        <number>12</number>
+       </property>
+
+       
+       <item>
+        <layout class="QFormLayout" name="formLayoutMode">
+         <property name="labelAlignment">
+          <set>Qt::AlignRight|Qt::AlignVCenter</set>
+         </property>
+         <item row="0" column="0">
+          <widget class="QLabel" name="labelMode">
+           <property name="text">
+            <string>Режим игры:</string>
+           </property>
+          </widget>
+         </item>
+         <item row="0" column="1">
+         <widget class="QComboBox" name="comboMode"/>
+         </item>
+         <item row="1" column="0" colspan="2">
+          <widget class="QCheckBox" name="checkSwapRule">
+           <property name="text">
+            <string>Правило обмена (Swap rule)</string>
+           </property>
+           <property name="toolTip">
+            <string>В режиме по линиям второй ходящий может забрать первый ход, поменяв стороны.</string>
+           </property>
+          </widget>
+         </item>
+       </layout>
+      </item>
+
+      
+      <item>
+       <layout class="QFormLayout" name="formLayoutRole">
+        <property name="labelAlignment">
+         <set>Qt::AlignRight|Qt::AlignVCenter</set>
+        </property>
+        <item row="0" column="0">
+         <widget class="QLabel" name="labelPlayerSide">
+          <property name="text">
+           <string>Вы играете за:</string>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <widget class="QComboBox" name="comboPlayerSide">
+          <item>
+           <property name="text">
+            <string>X</string>
+           </property>
+          </item>
+          <item>
+           <property name="text">
+            <string>O</string>
+           </property>
+          </item>
+         </widget>
+        </item>
+       </layout>
+      </item>
+
+      
+      <item>
+       <layout class="QFormLayout" name="formLayoutGameType">
+        <property name="labelAlignment">
+         <set>Qt::AlignRight|Qt::AlignVCenter</set>
+        </property>
+        <item row="0" column="0">
+         <widget class="QLabel" name="labelGameType">
+          <property name="text">
+           <string>Тип игры:</string>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <widget class="QComboBox" name="comboGameType"/>
+        </item>
+        <item row="1" column="0">
+         <widget class="QLabel" name="labelAIVsAISpeed">
+          <property name="text">
+           <string>AI vs AI скорость:</string>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="1">
+         <widget class="QComboBox" name="comboAIVsAISpeed"/>
+        </item>
+       </layout>
+      </item>
+
+      
+      <item>
+       <widget class="QGroupBox" name="groupBoxInfo">
+        <property name="title">
+         <string>Статистика</string>
+        </property>
+        <property name="visible">
+         <bool>false</bool>
+        </property>
+        <layout class="QFormLayout" name="formLayoutInfo">
+         <property name="labelAlignment">
+          <set>Qt::AlignRight|Qt::AlignVCenter</set>
+         </property>
+
+         <item row="0" column="0">
+          <widget class="QLabel" name="labelCurrent">
+           <property name="text">
+            <string>Ходит:</string>
+           </property>
+          </widget>
+         </item>
+         <item row="0" column="1">
+          <widget class="QLabel" name="labelCurrentPlayer">
+           <property name="text">
+            <string>X</string>
+           </property>
+          </widget>
+         </item>
+
+         <item row="1" column="0">
+          <widget class="QLabel" name="labelLinesXTitle">
+           <property name="text">
+            <string>Линии X:</string>
+           </property>
+          </widget>
+         </item>
+         <item row="1" column="1">
+          <widget class="QLabel" name="labelLinesX">
+           <property name="text">
+            <string>0</string>
+           </property>
+          </widget>
+         </item>
+
+         <item row="2" column="0">
+          <widget class="QLabel" name="labelLinesOTitle">
+           <property name="text">
+            <string>Линии O:</string>
+           </property>
+          </widget>
+         </item>
+         <item row="2" column="1">
+          <widget class="QLabel" name="labelLinesO">
+           <property name="text">
+            <string>0</string>
+           </property>
+          </widget>
+         </item>
+
+         <item row="3" column="0">
+          <widget class="QLabel" name="labelScoreTitle">
+           <property name="text">
+            <string>Score (O - X):</string>
+           </property>
+          </widget>
+         </item>
+         <item row="3" column="1">
+          <widget class="QLabel" name="labelScore">
+           <property name="text">
+            <string>0</string>
+           </property>
+          </widget>
+         </item>
+
+         <item row="4" column="0">
+          <widget class="QLabel" name="labelAiMoveTitle">
+           <property name="text">
+            <string>Ход ИИ:</string>
+           </property>
+          </widget>
+         </item>
+        <item row="4" column="1">
+         <widget class="QLabel" name="labelAiMove">
+            <property name="text">
+             <string>—</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignLeft|Qt::AlignVCenter</set>
+            </property>
+           </widget>
+         </item>
+        </layout>
+       </widget>
+      </item>
+
+      
+      <item>
+       <widget class="QPushButton" name="btnShowStats">
+        <property name="text">
+         <string>Показать статистику</string>
+        </property>
+       </widget>
+      </item>
+
+      
+       <item>
+        <widget class="QGroupBox" name="groupBoxBoard">
+         <property name="title">
+          <string>Параметры поля</string>
+         </property>
+         <layout class="QFormLayout" name="formLayoutBoard">
+          <property name="labelAlignment">
+           <set>Qt::AlignRight|Qt::AlignVCenter</set>
+          </property>
+
+          
+          <item row="0" column="0">
+           <widget class="QLabel" name="labelBoardRows">
+            <property name="text">
+             <string>Высота (строки):</string>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QSpinBox" name="spinBoardRows">
+            <property name="minimum">
+             <number>3</number>
+            </property>
+            <property name="maximum">
+             <number>15</number>
+            </property>
+            <property name="value">
+             <number>3</number>
+            </property>
+           </widget>
+          </item>
+
+          
+          <item row="1" column="0">
+           <widget class="QLabel" name="labelBoardCols">
+            <property name="text">
+             <string>Ширина (столбцы):</string>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QSpinBox" name="spinBoardCols">
+            <property name="minimum">
+             <number>3</number>
+            </property>
+            <property name="maximum">
+             <number>15</number>
+            </property>
+            <property name="value">
+             <number>3</number>
+            </property>
+           </widget>
+          </item>
+
+          
+          <item row="2" column="0">
+           <widget class="QLabel" name="labelWinLength">
+            <property name="text">
+             <string>Длина линии:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="1">
+           <widget class="QSpinBox" name="spinWinLength">
+            <property name="minimum">
+             <number>3</number>
+            </property>
+            <property name="maximum">
+             <number>15</number>
+            </property>
+            <property name="value">
+             <number>3</number>
+            </property>
+           </widget>
+          </item>
+
+         </layout>
+        </widget>
+       </item>
+
+       
+      <item>
+        <widget class="QGroupBox" name="groupBoxAI">
+         <property name="title">
+          <string>Параметры ИИ</string>
+         </property>
+         <layout class="QFormLayout" name="formLayoutAI">
+          <property name="labelAlignment">
+           <set>Qt::AlignRight|Qt::AlignVCenter</set>
+          </property>
+          <item row="0" column="0">
+            <widget class="QLabel" name="labelDepth">
+             <property name="text">
+              <string>Глубина:</string>
+             </property>
+            </widget>
+           </item>
+          <item row="0" column="1">
+            <widget class="QSpinBox" name="spinDepth"/>
+          </item>
+          <item row="1" column="0" colspan="2">
+            <widget class="QCheckBox" name="checkDynamicDepth">
+             <property name="text">
+              <string>Динамический поиск (по времени)</string>
+             </property>
+             <property name="toolTip">
+              <string>Итеративное углубление с ограничением по времени на ход.</string>
+             </property>
+            </widget>
+          </item>
+          <item row="2" column="0">
+            <widget class="QLabel" name="labelTimeLimit">
+             <property name="text">
+              <string>Лимит, сек:</string>
+             </property>
+            </widget>
+          </item>
+          <item row="2" column="1">
+           <widget class="QSpinBox" name="spinTimeLimit">
+            <property name="minimum">
+             <number>1</number>
+            </property>
+            <property name="maximum">
+             <number>20</number>
+            </property>
+            <property name="value">
+             <number>10</number>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="0" colspan="2">
+            <widget class="QCheckBox" name="checkMemo">
+             <property name="text">
+               <string>Мемоизация (кеш)</string>
+              </property>
+              <property name="checked">
+               <bool>true</bool>
+              </property>
+             </widget>
+          </item>
+          <item row="4" column="0" colspan="2">
+            <widget class="QCheckBox" name="checkAutoAi">
+             <property name="text">
+              <string>Автоход ИИ</string>
+             </property>
+             <property name="checked">
+              <bool>true</bool>
+             </property>
+            </widget>
+          </item>
+          <item row="5" column="0" colspan="2">
+            <widget class="QCheckBox" name="checkEvalHuman">
+             <property name="text">
+              <string>Оценивать ходы игрока</string>
+             </property>
+             <property name="checked">
+              <bool>false</bool>
+             </property>
+            </widget>
+          </item>
+          <item row="6" column="0" colspan="2">
+            <widget class="QCheckBox" name="checkHintDynamic">
+             <property name="text">
+              <string>Динамическая подсказка</string>
+             </property>
+            </widget>
+          </item>
+          <item row="7" column="0">
+            <widget class="QLabel" name="labelHintTime">
+             <property name="text">
+              <string>Лимит подсказки, сек:</string>
+             </property>
+            </widget>
+          </item>
+          <item row="7" column="1">
+            <widget class="QSpinBox" name="spinHintTime">
+             <property name="minimum">
+              <number>1</number>
+             </property>
+             <property name="maximum">
+              <number>20</number>
+             </property>
+             <property name="value">
+              <number>10</number>
+             </property>
+            </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+
+       
+       <item>
+        <layout class="QHBoxLayout" name="layoutButtonsTop">
+         <item>
+          <widget class="QPushButton" name="btnNewGame">
+           <property name="text">
+            <string>Новая партия</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="btnEndGame">
+           <property name="text">
+            <string>Завершить партию</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+
+       <item>
+       <layout class="QHBoxLayout" name="layoutButtonsBottom">
+        <item>
+         <widget class="QPushButton" name="btnBestMove">
+          <property name="text">
+           <string>Ход ИИ</string>
+         </property>
+       </widget>
+      </item>
+        <item>
+         <widget class="QPushButton" name="btnCancelAi">
+          <property name="text">
+           <string>Прервать ход ИИ</string>
+          </property>
+         </widget>
+        </item>
+       <item>
+        <widget class="QPushButton" name="btnAIVsAIStep">
+         <property name="text">
+          <string>Следующий ход AI vs AI</string>
+         </property>
+         </widget>
+        </item>
+         <item>
+          <widget class="QPushButton" name="btnHint">
+           <property name="text">
+            <string>Подсказка</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+
+       
+      <item>
+       <widget class="QGroupBox" name="groupBoxBigInfo">
+        <property name="title">
+         <string>Ход / подсказка</string>
+        </property>
+        <layout class="QVBoxLayout" name="verticalLayoutBigInfo">
+          <property name="margin">
+           <number>8</number>
+          </property>
+         <item>
+         <widget class="QLabel" name="labelBigInfo">
+            <property name="text">
+            <string>—</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignLeft|Qt::AlignVCenter</set>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+           </widget>
+         </item>
+        </layout>
+       </widget>
+      </item>
+
+      
+      <item>
+       <widget class="QGroupBox" name="groupBoxStatus">
+        <property name="title">
+         <string>Статус</string>
+        </property>
+        <layout class="QVBoxLayout" name="verticalLayoutStatus">
+         <property name="margin">
+          <number>8</number>
+         </property>
+         <item>
+          <widget class="QLabel" name="labelGameState">
+           <property name="text">
+            <string>Игра не идёт</string>
+           </property>
+           <property name="alignment">
+            <set>Qt::AlignLeft|Qt::AlignVCenter</set>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLabel" name="labelStatus">
+           <property name="text">
+            <string>—</string>
+           </property>
+           <property name="wordWrap">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </widget>
+      </item>
+
+       <item>
+        <spacer name="verticalSpacer">
+         <property name="orientation">
+          <enum>Qt::Vertical</enum>
+         </property>
+         <property name="sizeHint">
+          <size>
+           <width>20</width>
+           <height>40</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+
+      </layout>
+     </widget>
+    </item>
+   </layout>
+  </widget>
+
+  <widget class="QMenuBar" name="menubar">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>900</width>
+     <height>21</height>
+    </rect>
+   </property>
+  </widget>
+  <widget class="QStatusBar" name="statusbar"/>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>
