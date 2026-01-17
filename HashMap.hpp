@@ -67,21 +67,42 @@ public:
         }
 
         size_t index = hash(key);
+        size_t firstDeleted = capacity_;
         for (size_t i = 0; i < capacity_; ++i) {
             size_t pos = probe(index, i);
             Entry& entry = table_[pos];
 
-            if (!entry.occupied || entry.deleted) {
-                entry = Entry(key, value);
+            if (!entry.occupied) {
+                if (firstDeleted != capacity_) {
+                    table_[firstDeleted] = Entry(key, value);
+                } else {
+                    entry = Entry(key, value);
+                }
                 ++size_;
                 return;
             }
 
-            if (entry.key == key) {
+            if (entry.occupied && entry.deleted) {
+                if (firstDeleted == capacity_) {
+                    firstDeleted = pos;
+                }
+                continue;
+            }
+
+            if (entry.key == key && !entry.deleted) {
                 entry.value = value;
                 return;
             }
         }
+
+        if (firstDeleted != capacity_) {
+            table_[firstDeleted] = Entry(key, value);
+            ++size_;
+            return;
+        }
+
+        rehash();
+        insert(key, value);
     }
 
     bool contains(const K& key) const {
@@ -147,5 +168,18 @@ public:
             table_[i] = Entry();
         }
         size_ = 0;
+    }
+
+    void reset() {
+        capacity_ = INITIAL_CAPACITY;
+        table_ = DynamicArray<Entry>(capacity_);
+        for (size_t i = 0; i < capacity_; ++i) {
+            table_.push_back(Entry());
+        }
+        size_ = 0;
+    }
+
+    void shrink_to_fit() {
+        reset();
     }
 };

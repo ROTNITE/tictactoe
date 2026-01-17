@@ -91,6 +91,10 @@ private:
     QString seatLabel(Seat seat) const;
     QString sideLabel(Player side) const;
     void updateTurnIndicator();
+    int recommendedDepth() const;
+    int effectiveDepth() const;
+    void refreshAutoDepthUi();
+    void startAsyncOpeningChoice();
 
 private slots:
     void onNewGameClicked();
@@ -114,6 +118,9 @@ private slots:
     void onUseLmrToggled(Qt::CheckState state);
     void onUseExtensionsToggled(Qt::CheckState state);
     void onOpeningRuleChanged(int index);
+    void onAutoDepthToggled(Qt::CheckState state);
+    void onDepthChanged(int value);
+    void onOpeningFinished();
 
 private:
     class AiSearchResult {
@@ -122,6 +129,12 @@ private:
         MoveEvaluation best;
         AIStatistics stats;
         bool cancelled = false;
+    };
+
+    class OpeningAsyncResult {
+    public:
+        bool resolved = false;
+        OpeningDecision decision;
     };
 
     enum class HintTask {
@@ -171,6 +184,8 @@ private:
     bool humanIsX_ = true;
     bool dynamicDepthMode_ = false;
     int  timeLimitMs_ = 8000;
+    bool autoDepthEnabled_ = false;
+    int manualDepth_ = 9;
     QStringList recentMoves_;
     QString hintLine_;
     QString detailedStats_;
@@ -191,14 +206,18 @@ private:
     QFutureWatcher<AIVsAIStepResult> aiVsAiStepWatcher_;
     bool aiSearchCanceled_ = false;
     bool hintCanceled_ = false;
+    bool stoppingInProgress_ = false;
     std::atomic<int> sessionId_{0};
     int aiSearchTicket_ = 0;
     int hintTicket_ = 0;
     int aiVsAiTicket_ = 0;
     int aiVsAiStepTicket_ = 0;
+    int openingTicket_ = 0;
+    bool openingInProgress_ = false;
     OpeningRule openingRule_ = OpeningRule::None;
     Seat humanSeat_ = Seat::A;
     QLabel* turnIndicatorLabel_ = nullptr;
+    QFutureWatcher<OpeningAsyncResult> openingWatcher_;
 };
 
 #endif

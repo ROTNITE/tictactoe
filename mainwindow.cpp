@@ -13,7 +13,10 @@
 #include <QVBoxLayout>
 #include <QGroupBox>
 #include <QAbstractButton>
+#include <QProgressDialog>
+#include <QEventLoop>
 #include <algorithm>
+#include <iostream>
 #include <limits>
 #include <QtConcurrent/QtConcurrent>
 #include <QSignalBlocker>
@@ -98,6 +101,7 @@ MainWindow::MainWindow(QWidget *parent)
     ui->spinDepth->setMinimum(1);
     ui->spinDepth->setMaximum(15);
     ui->spinDepth->setValue(9);
+    ui->checkAutoDepth->setChecked(false);
     ui->checkDynamicDepth->setChecked(false);
     ui->spinTimeLimit->setMinimum(1);
     ui->spinTimeLimit->setMaximum(20);
@@ -132,6 +136,8 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->spinTimeLimit, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::onTimeLimitChanged);
     connect(ui->checkAutoAi, &QCheckBox::checkStateChanged, this, &MainWindow::onAutoAiToggled);
     connect(ui->checkDynamicDepth, &QCheckBox::checkStateChanged, this, &MainWindow::onDynamicDepthToggled);
+    connect(ui->checkAutoDepth, &QCheckBox::checkStateChanged, this, &MainWindow::onAutoDepthToggled);
+    connect(ui->spinDepth, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::onDepthChanged);
     connect(ui->comboOpeningRule, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onOpeningRuleChanged);
     connect(ui->comboEnginePreset, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onEnginePresetChanged);
     connect(ui->groupBoxAdvanced, &QGroupBox::toggled, this, &MainWindow::onAdvancedToggled);
@@ -142,6 +148,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(&hintWatcher_, &QFutureWatcher<AiSearchResult>::finished, this, &MainWindow::onHintFinished);
     connect(&aiVsAiWatcher_, &QFutureWatcher<AIVsAIResult>::finished, this, &MainWindow::onAiVsAiFinished);
     connect(&aiVsAiStepWatcher_, &QFutureWatcher<AIVsAIStepResult>::finished, this, &MainWindow::onAiVsAiStepFinished);
+    connect(&openingWatcher_, &QFutureWatcher<OpeningAsyncResult>::finished, this, &MainWindow::onOpeningFinished);
 
     
     connect(ui->spinBoardRows, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::onBoardSizeChanged);
@@ -165,6 +172,9 @@ MainWindow::MainWindow(QWidget *parent)
     hintInProgress_     = false;
     hintCanceled_       = false;
     applyEnginePresetFromUi();
+    autoDepthEnabled_   = ui->checkAutoDepth->isChecked();
+    manualDepth_        = ui->spinDepth->value();
+    refreshAutoDepthUi();
 
     
     rebuildBoard();
@@ -193,16 +203,51 @@ MainWindow::~MainWindow()
 
 void MainWindow::stopAllAi(bool resetCancelFlag)
 {
+    if (stoppingInProgress_) return;
+    stoppingInProgress_ = true;
+
     controller_.setOnAIMoveCallback(nullptr);
     aiCancelFlag_.store(true, std::memory_order_relaxed);
     hintCancelFlag_.store(true, std::memory_order_relaxed);
+
+    bool anyRunning =
+        aiWatcher_.isRunning() ||
+        hintWatcher_.isRunning() ||
+        aiVsAiWatcher_.isRunning() ||
+        aiVsAiStepWatcher_.isRunning() ||
+        openingWatcher_.isRunning();
+
+    QProgressDialog progress(QStringLiteral("Отмена..."), QString(), 0, 0, this);
+    if (anyRunning) {
+        progress.setWindowModality(Qt::ApplicationModal);
+        progress.setCancelButton(nullptr);
+        progress.setMinimumDuration(0);
+        progress.show();
+        qApp->processEvents();
+    }
+
+    auto waitWatcher = [&](QFutureWatcherBase* watcher) {
+        if (!watcher || !watcher->isRunning()) return;
+        QEventLoop loop;
+        QObject::connect(watcher, &QFutureWatcherBase::finished, &loop, &QEventLoop::quit);
+        loop.exec();
+    };
+
+    waitWatcher(&aiWatcher_);
+    waitWatcher(&hintWatcher_);
+    waitWatcher(&aiVsAiWatcher_);
+    waitWatcher(&aiVsAiStepWatcher_);
+    waitWatcher(&openingWatcher_);
+
+    if (anyRunning) {
+        progress.close();
+    }
+
     if (aiSearchInProgress_) {
-        aiWatcher_.waitForFinished();
         aiSearchInProgress_ = false;
         aiSearchCanceled_ = false;
     }
     if (hintInProgress_) {
-        hintWatcher_.waitForFinished();
         hintInProgress_ = false;
         hintCanceled_ = false;
         currentHintTask_ = HintTask::None;
@@ -210,12 +255,13 @@ void MainWindow::stopAllAi(bool resetCancelFlag)
         evalMoverLabel_.clear();
     }
     if (aiVsAiRunning_) {
-        aiVsAiWatcher_.waitForFinished();
         aiVsAiRunning_ = false;
     }
     if (aiVsAiStepBusy_) {
-        aiVsAiStepWatcher_.waitForFinished();
         aiVsAiStepBusy_ = false;
+    }
+    if (openingInProgress_) {
+        openingInProgress_ = false;
     }
     aiVsAiStepMode_ = false;
     ui->btnCancelAi->setEnabled(false);
@@ -226,7 +272,10 @@ void MainWindow::stopAllAi(bool resetCancelFlag)
         hintTicket_ = -1;
         aiVsAiTicket_ = -1;
         aiVsAiStepTicket_ = -1;
+        openingTicket_ = -1;
     }
+
+    stoppingInProgress_ = false;
 }
 
 void MainWindow::keyPressEvent(QKeyEvent *event)
@@ -491,6 +540,8 @@ void MainWindow::onBoardSizeChanged(int newValue)
         winLen = maxLen;
     }
     ui->spinWinLength->setValue(winLen);
+
+    refreshAutoDepthUi();
 }
 
 
@@ -729,29 +780,32 @@ QSet<QPoint> MainWindow::findWinningCells(CellState player) const
 
 void MainWindow::setSettingsEnabled(bool enabled)
 {
-    settingsLocked_ = !enabled;
-    ui->comboMode->setEnabled(enabled);
-    ui->spinBoardRows->setEnabled(enabled);
-    ui->spinBoardCols->setEnabled(enabled);
-    ui->spinWinLength->setEnabled(enabled);
-    ui->spinDepth->setEnabled(enabled);
-    ui->checkDynamicDepth->setEnabled(enabled);
-    ui->checkMemo->setEnabled(enabled);
-    ui->comboEnginePreset->setEnabled(enabled);
-    ui->groupBoxAdvanced->setEnabled(enabled);
-    ui->comboOpeningRule->setEnabled(enabled);
-    ui->spinTimeLimit->setEnabled(enabled && ui->checkDynamicDepth->isChecked());
+    bool allow = enabled && !openingInProgress_;
+    settingsLocked_ = !allow;
+    ui->comboMode->setEnabled(allow);
+    ui->spinBoardRows->setEnabled(allow);
+    ui->spinBoardCols->setEnabled(allow);
+    ui->spinWinLength->setEnabled(allow);
+    ui->spinDepth->setEnabled(allow && !autoDepthEnabled_);
+    ui->checkAutoDepth->setEnabled(allow && !dynamicDepthMode_);
+    ui->checkDynamicDepth->setEnabled(allow && !autoDepthEnabled_);
+    ui->checkMemo->setEnabled(allow);
+    ui->comboEnginePreset->setEnabled(allow);
+    ui->groupBoxAdvanced->setEnabled(allow);
+    ui->comboOpeningRule->setEnabled(allow);
+    ui->spinTimeLimit->setEnabled(allow && ui->checkDynamicDepth->isChecked());
     
     ui->checkAutoAi->setEnabled(currentGameType_ == GameType::HumanVsAI);
-    ui->comboGameType->setEnabled(enabled);
-    ui->comboAIVsAISpeed->setEnabled(enabled && currentGameType_ == GameType::AIVsAI);
+    ui->comboGameType->setEnabled(allow);
+    ui->comboAIVsAISpeed->setEnabled(allow && currentGameType_ == GameType::AIVsAI);
     ui->btnHint->setEnabled(!controller_.isGameOver() && currentGameType_ != GameType::AIVsAI);
     if (hintInProgress_) {
         ui->btnHint->setEnabled(false);
     }
-    ui->comboPlayerSide->setEnabled(enabled && currentGameType_ == GameType::HumanVsAI);
+    ui->comboPlayerSide->setEnabled(allow && currentGameType_ == GameType::HumanVsAI);
     updateGameTypeUiState();
     updateOpeningUiState();
+    refreshAutoDepthUi();
 }
 
 MainWindow::GameType MainWindow::gameTypeFromUI() const
@@ -800,7 +854,7 @@ void MainWindow::updateGameTypeUiState()
     bool aiGame  = (currentGameType_ == GameType::HumanVsAI);
     bool aiVsAi  = (currentGameType_ == GameType::AIVsAI);
     bool unlocked = !settingsLocked_;
-    bool busy = aiSearchInProgress_ || aiVsAiRunning_ || aiVsAiStepBusy_ || hintInProgress_;
+    bool busy = aiSearchInProgress_ || aiVsAiRunning_ || aiVsAiStepBusy_ || hintInProgress_ || openingInProgress_;
 
     if (!aiGame) {
         autoAiEnabled_ = false;
@@ -815,12 +869,14 @@ void MainWindow::updateGameTypeUiState()
     ui->btnBestMove->setEnabled(aiGame && !controller_.isGameOver());
     ui->btnAIVsAIStep->setEnabled(aiVsAi && currentAIVsAISpeed_ == AIVsAISpeed::Step && !controller_.isGameOver() && !aiVsAiStepBusy_);
     ui->btnHint->setEnabled(!aiVsAi && !controller_.isGameOver() && !hintInProgress_);
-    ui->btnCancelAi->setEnabled(aiSearchInProgress_ || aiVsAiRunning_ || aiVsAiStepBusy_ || hintInProgress_);
+    ui->btnCancelAi->setEnabled(aiSearchInProgress_ || aiVsAiRunning_ || aiVsAiStepBusy_ || hintInProgress_ || openingInProgress_);
     ui->btnNewGame->setEnabled(!busy);
     
     ui->btnEndGame->setEnabled(!controller_.isGameOver() || busy);
-    ui->checkDynamicDepth->setEnabled(unlocked);
+    ui->checkDynamicDepth->setEnabled(unlocked && !autoDepthEnabled_);
     ui->spinTimeLimit->setEnabled(unlocked && ui->checkDynamicDepth->isChecked());
+    ui->checkAutoDepth->setEnabled(unlocked && !dynamicDepthMode_);
+    ui->spinDepth->setEnabled(unlocked && !autoDepthEnabled_);
     updateOpeningUiState();
 }
 
@@ -868,6 +924,7 @@ void MainWindow::onOpeningRuleChanged(int index)
     openingRule_ = openingRuleFromUi();
     controller_.setOpeningRule(openingRule_);
     updateOpeningUiState();
+    refreshAutoDepthUi();
 }
 
 void MainWindow::showOpeningRuleInfoDialog()
@@ -896,23 +953,84 @@ void MainWindow::showOpeningRuleInfoDialog()
     QMessageBox::information(this, QStringLiteral("Правило игры"), text);
 }
 
+void MainWindow::startAsyncOpeningChoice()
+{
+    if (openingInProgress_) return;
+    if (!isOpeningChoicePhase(controller_.openingPhase())) return;
+    if (!isCurrentSeatAi()) return;
+
+    openingInProgress_ = true;
+    openingTicket_ = sessionId_.load(std::memory_order_relaxed);
+    aiCancelFlag_.store(false, std::memory_order_relaxed);
+
+    setBigInfo("ИИ выбирает правило открытия...");
+    setSettingsEnabled(false);
+    updateGameTypeUiState();
+
+    int depth = effectiveDepth();
+    bool memo = ui->checkMemo->isChecked();
+    int timeLimit = dynamicDepthMode_ ? ui->spinTimeLimit->value() * 1000 : -1;
+    int ticket = openingTicket_;
+
+    openingWatcher_.setFuture(QtConcurrent::run([this, depth, memo, timeLimit, ticket]() {
+        OpeningAsyncResult out;
+        if (ticket != sessionId_.load(std::memory_order_relaxed)) {
+            return out;
+        }
+        OpeningDecision decision = controller_.computeOpeningDecisionForCurrentSeatAI(
+            depth, memo, timeLimit, &aiCancelFlag_);
+        if (ticket != sessionId_.load(std::memory_order_relaxed)) {
+            return OpeningAsyncResult{};
+        }
+        out.decision = decision;
+        out.resolved = out.decision.valid;
+        return out;
+    }));
+}
+
+void MainWindow::onOpeningFinished()
+{
+    const int currentSession = sessionId_.load(std::memory_order_relaxed);
+    if (openingTicket_ != currentSession) {
+        openingInProgress_ = false;
+        updateGameTypeUiState();
+        return;
+    }
+
+    openingInProgress_ = false;
+    OpeningAsyncResult result = openingWatcher_.result();
+    if (result.resolved) {
+        bool applied = controller_.applyOpeningDecision(result.decision);
+        if (applied) {
+            syncHumanSideFromSeat();
+            if (!result.decision.actionText.empty()) {
+                setBigInfo(QString::fromStdString(result.decision.actionText));
+            } else {
+                setBigInfo("ИИ сделал выбор открытия.");
+            }
+            refreshBoardView();
+            updateStatusLabels();
+            updateOpeningUiState();
+        }
+    }
+
+    updateGameTypeUiState();
+    if (!controller_.isGameOver()) {
+        autoPlayAiIfNeeded();
+    }
+}
+
 bool MainWindow::resolveOpeningChoiceIfNeeded()
 {
     if (!isOpeningChoicePhase(controller_.openingPhase())) return false;
     if (currentGameType_ == GameType::AIVsAI) return false;
 
     if (isCurrentSeatAi()) {
-        int depth = ui->spinDepth->value();
-        if (dynamicDepthMode_) {
-            depth = std::max(depth, 12);
+        if (openingInProgress_) {
+            return true;
         }
-        bool memo = ui->checkMemo->isChecked();
-        bool resolved = controller_.autoResolveOpeningChoiceForCurrentAI(depth, memo, &aiCancelFlag_);
-        if (resolved) {
-            syncHumanSideFromSeat();
-            setBigInfo("ИИ сделал выбор открытия.");
-        }
-        return resolved;
+        startAsyncOpeningChoice();
+        return true;
     }
 
     OpeningPhase phase = controller_.openingPhase();
@@ -1015,10 +1133,7 @@ void MainWindow::startAutoAIVsAIGame(bool autoMode)
     ui->labelAiMove->setText("-");
     ui->labelStatus->setText("Игра идёт (AI vs AI автоматически).");
 
-    int  depth = ui->spinDepth->value();
-    if (dynamicDepthMode_) {
-        depth = std::max(depth, 12);
-    }
+    int  depth = effectiveDepth();
     bool memo  = ui->checkMemo->isChecked();
     int sleepMs = autoMode ? 60 : 600;
 
@@ -1068,10 +1183,7 @@ void MainWindow::startStepAIVsAIGame()
     setSettingsEnabled(false);
     updateGameTypeUiState();
 
-    int  depth = ui->spinDepth->value();
-    if (dynamicDepthMode_) {
-        depth = std::max(depth, 12);
-    }
+    int  depth = effectiveDepth();
     bool memo  = ui->checkMemo->isChecked();
     aiVsAiStepTicket_ = sessionId_.load(std::memory_order_relaxed);
     aiStepDepthX_ = depth;
@@ -1254,9 +1366,9 @@ void MainWindow::startAsyncHint(Player p, bool isEvaluation, const QString& move
     hintCancelFlag_.store(false, std::memory_order_relaxed);
     hintCanceled_ = false;
 
-    int depth = ui->spinDepth->value();
+    int depth = effectiveDepth();
     bool memo = ui->checkMemo->isChecked();
-    int timeLimit = -1;
+    int timeLimit = ui->spinTimeLimit->value() * 1000;
 
     int ticket = hintTicket_;
     hintWatcher_.setFuture(QtConcurrent::run([this, p, depth, memo, timeLimit, ticket]() {AiSearchResult out; MoveEvaluation bestSoFar(Coord(-1, -1), std::numeric_limits<int>::min()); AIStatistics stats;  out.result = controller_.findBestMove(p, depth, memo, stats, &bestSoFar, &hintCancelFlag_, timeLimit); out.best   = bestSoFar; out.stats  = stats; out.cancelled = hintCancelFlag_.load(std::memory_order_relaxed);  if (ticket != sessionId_.load(std::memory_order_relaxed)) {out.result = MoveEvaluation(Coord(-1, -1), std::numeric_limits<int>::min()); out.best   = out.result; } return out; }));
@@ -1304,10 +1416,7 @@ void MainWindow::startAsyncAiMove(Player aiPlayer)
     aiCancelFlag_.store(false, std::memory_order_relaxed);
     aiSearchCanceled_ = false;
 
-    int  depth = ui->spinDepth->value();
-    if (dynamicDepthMode_) {
-        depth = std::max(depth, 12);
-    }
+    int  depth = effectiveDepth();
     bool memo  = ui->checkMemo->isChecked();
     int  timeLimit = dynamicDepthMode_ ? ui->spinTimeLimit->value() * 1000 : -1;
     Seat seat = controller_.seatToMove();
@@ -1366,6 +1475,23 @@ void MainWindow::onAiSearchFinished()
                          .arg(static_cast<long long>(pack.stats.timeMs))
                          .arg(cancelNote)
                          .arg(depthNote);
+#ifndef NDEBUG
+    {
+        const AIStatistics& s = pack.stats;
+        uint64_t nodeCount = s.nodes > 0 ? s.nodes : static_cast<uint64_t>(s.nodesVisited);
+        double elapsedMs = s.elapsedMs > 0.0 ? s.elapsedMs : static_cast<double>(s.timeMs);
+        double nodesSec = elapsedMs > 0.0 ? (static_cast<double>(nodeCount) * 1000.0 / elapsedMs) : 0.0;
+        double hitRate = s.ttProbes > 0 ? (100.0 * static_cast<double>(s.ttHits) / static_cast<double>(s.ttProbes)) : 0.0;
+        double avgBefore = nodeCount > 0 ? (static_cast<double>(s.generatedMoves) / static_cast<double>(nodeCount)) : 0.0;
+        double avgAfter = nodeCount > 0 ? (static_cast<double>(s.expandedMoves) / static_cast<double>(nodeCount)) : 0.0;
+        std::cout << "[AI] nodes/sec=" << nodesSec
+                  << " ttHitRate=" << hitRate << "% "
+                  << "avgMoves=" << avgBefore << "/" << avgAfter
+                  << " depth=" << s.completedDepth
+                  << " timeMs=" << elapsedMs
+                  << "\n";
+    }
+#endif
 
     if (controller_.isGameOver()) {
         ui->labelStatus->setText("Игра не идёт");
@@ -1520,18 +1646,19 @@ void MainWindow::showGameOverMessage()
 void MainWindow::autoPlayAiIfNeeded()
 {
     if (hintInProgress_) return;
+    if (openingInProgress_) return;
     if (currentGameType_ != GameType::HumanVsAI) return;
     if (!autoAiEnabled_) return;
     if (aiVsAiStepMode_) return;
     if (controller_.isGameOver()) return;
     if (aiSearchInProgress_) return;
 
-    if (resolveOpeningChoiceIfNeeded()) {
-        refreshBoardView();
-        updateStatusLabels();
-        if (controller_.isGameOver()) return;
+    if (isOpeningChoicePhase(controller_.openingPhase())) {
+        if (isCurrentSeatAi()) {
+            startAsyncOpeningChoice();
+        }
+        return;
     }
-    if (isOpeningChoicePhase(controller_.openingPhase())) return;
     if (!isCurrentSeatAi()) return;
 
     startAsyncAiMove(controller_.currentPlayer());
@@ -1568,6 +1695,10 @@ void MainWindow::handleBoardClick(int row, int col)
     }
 
     if (isOpeningChoicePhase(controller_.openingPhase())) {
+        if (isCurrentSeatAi()) {
+            startAsyncOpeningChoice();
+            return;
+        }
         if (resolveOpeningChoiceIfNeeded()) {
             refreshBoardView();
             updateStatusLabels();
@@ -1682,6 +1813,7 @@ void MainWindow::onNewGameClicked()
     hintLine_.clear();
     detailedStats_.clear();
     setLastMove(Coord(-1, -1));
+    refreshAutoDepthUi();
 
     setSettingsEnabled(false);
     updateGameTypeUiState();
@@ -1821,6 +1953,7 @@ void MainWindow::onModeChanged(int index)
 {
     Q_UNUSED(index);
     onNewGameClicked();
+    refreshAutoDepthUi();
 }
 
 void MainWindow::onGameTypeChanged(int index)
@@ -1844,15 +1977,169 @@ void MainWindow::onAutoAiToggled(Qt::CheckState state)
 
 void MainWindow::onDynamicDepthToggled(Qt::CheckState state)
 {
-    dynamicDepthMode_ = (state != Qt::Unchecked);
+    bool enable = (state != Qt::Unchecked);
+    if (enable && autoDepthEnabled_) {
+        QSignalBlocker block(ui->checkAutoDepth);
+        ui->checkAutoDepth->setChecked(false);
+        autoDepthEnabled_ = false;
+    }
+    dynamicDepthMode_ = enable;
     ui->spinTimeLimit->setEnabled(dynamicDepthMode_);
     timeLimitMs_ = ui->spinTimeLimit->value() * 1000;
+    refreshAutoDepthUi();
 }
 
 void MainWindow::onTimeLimitChanged(int seconds)
 {
     Q_UNUSED(seconds);
     timeLimitMs_ = ui->spinTimeLimit->value() * 1000;
+}
+
+void MainWindow::onAutoDepthToggled(Qt::CheckState state)
+{
+    autoDepthEnabled_ = (state != Qt::Unchecked);
+    if (autoDepthEnabled_) {
+        manualDepth_ = ui->spinDepth->value();
+        if (dynamicDepthMode_) {
+            QSignalBlocker block(ui->checkDynamicDepth);
+            ui->checkDynamicDepth->setChecked(false);
+            dynamicDepthMode_ = false;
+            ui->spinTimeLimit->setEnabled(false);
+        }
+    }
+    refreshAutoDepthUi();
+}
+
+void MainWindow::onDepthChanged(int value)
+{
+    if (!autoDepthEnabled_) {
+        manualDepth_ = value;
+    }
+}
+
+int MainWindow::recommendedDepth() const
+{
+    int rows = ui->spinBoardRows->value();
+    int cols = ui->spinBoardCols->value();
+    int area = rows * cols;
+
+    bool strictPreset = (ui->comboEnginePreset->currentIndex() == 1);
+    int depth = 4;
+    if (strictPreset) {
+        if (area <= 25) depth = 9;
+        else if (area <= 49) depth = 7;
+        else if (area <= 64) depth = 6;
+        else if (area <= 100) depth = 5;
+        else depth = 4;
+    } else {
+        if (area <= 25) depth = 7;
+        else if (area <= 49) depth = 6;
+        else if (area <= 64) depth = 5;
+        else if (area <= 100) depth = 4;
+        else depth = 3;
+    }
+
+    MoveGenMode genMode = MoveGenMode::Hybrid;
+    bool lmr = true;
+    bool ext = true;
+    bool perfect = false;
+
+    if (ui->groupBoxAdvanced->isChecked()) {
+        int modeIdx = ui->comboMoveGenMode->currentIndex();
+        if (modeIdx == 0) genMode = MoveGenMode::Full;
+        else if (modeIdx == 1) genMode = MoveGenMode::Frontier;
+        lmr = ui->checkUseLmr->isChecked();
+        ext = ui->checkUseExtensions->isChecked();
+    } else {
+        EnginePreset preset = strictPreset ? EnginePreset::Strict : EnginePreset::Fast;
+        controller_.getPresetSettings(preset, genMode, lmr, ext, perfect);
+        Q_UNUSED(perfect);
+        if (preset == EnginePreset::Strict && area >= 64) {
+            genMode = MoveGenMode::Hybrid;
+            lmr = true;
+            ext = false;
+        }
+    }
+
+    if (genMode == MoveGenMode::Full) {
+        depth -= 1;
+        if (area >= 64) depth -= 1;
+    } else if (genMode == MoveGenMode::Frontier) {
+        depth += 1;
+    }
+
+    if (!lmr) {
+        depth -= 1;
+    }
+    if (ext && area >= 64) {
+        depth -= 1;
+    }
+
+    GameMode mode =
+        (ui->comboMode->currentIndex() == 0)
+            ? GameMode::LinesScore
+            : GameMode::Classic;
+    if (mode == GameMode::LinesScore && area >= 64) {
+        depth -= 1;
+    }
+
+    if (mode == GameMode::LinesScore) {
+        int winLen = ui->spinWinLength->value();
+        int filled = controller_.moveNumber();
+        double density = (area > 0) ? (static_cast<double>(filled) / static_cast<double>(area)) : 0.0;
+        enum Stage { Early, Mid, Late };
+        Stage stage =
+            (density <= 0.05) ? Early :
+            (density <= 0.15) ? Mid :
+                               Late;
+
+        const int pivot = 5;
+        int delta = pivot - winLen;
+        int adj = 0;
+        if (stage == Early) {
+            if (delta >= 2) adj += 2;
+            else if (delta == 1) adj += 1;
+            else if (delta <= -2) adj -= 1;
+        } else if (stage == Mid) {
+            if (delta >= 2) adj += 1;
+            else if (delta <= -2) adj -= 1;
+        }
+
+        if (area >= 225 && adj > 1) adj = 1;
+        depth += adj;
+    }
+
+    int minDepth = 2;
+    int maxDepth = ui->spinDepth->maximum();
+    if (depth < minDepth) depth = minDepth;
+    if (depth > maxDepth) depth = maxDepth;
+    return depth;
+}
+
+int MainWindow::effectiveDepth() const
+{
+    return autoDepthEnabled_ ? recommendedDepth() : ui->spinDepth->value();
+}
+
+void MainWindow::refreshAutoDepthUi()
+{
+    if (!ui->spinDepth || !ui->checkAutoDepth) return;
+
+    if (autoDepthEnabled_) {
+        int d = recommendedDepth();
+        QSignalBlocker block(ui->spinDepth);
+        ui->spinDepth->setValue(d);
+    } else {
+        QSignalBlocker block(ui->spinDepth);
+        ui->spinDepth->setValue(manualDepth_);
+    }
+
+    bool unlocked = !settingsLocked_;
+    ui->checkAutoDepth->setEnabled(unlocked && !dynamicDepthMode_);
+    if (ui->checkDynamicDepth) {
+        ui->checkDynamicDepth->setEnabled(unlocked && !autoDepthEnabled_);
+    }
+    ui->spinDepth->setEnabled(unlocked && !autoDepthEnabled_);
 }
 
 
@@ -1910,6 +2197,7 @@ void MainWindow::onEnginePresetChanged(int index)
 {
     Q_UNUSED(index);
     applyEnginePresetFromUi();
+    refreshAutoDepthUi();
 }
 
 void MainWindow::onAdvancedToggled(bool checked)
@@ -1919,6 +2207,7 @@ void MainWindow::onAdvancedToggled(bool checked)
     } else {
         applyEnginePresetFromUi();
     }
+    refreshAutoDepthUi();
 }
 
 void MainWindow::onMoveGenModeChanged(int index)
@@ -1927,6 +2216,7 @@ void MainWindow::onMoveGenModeChanged(int index)
     if (ui->groupBoxAdvanced->isChecked()) {
         applyAdvancedSettingsFromUi();
     }
+    refreshAutoDepthUi();
 }
 
 void MainWindow::onUseLmrToggled(Qt::CheckState state)
@@ -1935,6 +2225,7 @@ void MainWindow::onUseLmrToggled(Qt::CheckState state)
     if (ui->groupBoxAdvanced->isChecked()) {
         applyAdvancedSettingsFromUi();
     }
+    refreshAutoDepthUi();
 }
 
 void MainWindow::onUseExtensionsToggled(Qt::CheckState state)
@@ -1943,6 +2234,7 @@ void MainWindow::onUseExtensionsToggled(Qt::CheckState state)
     if (ui->groupBoxAdvanced->isChecked()) {
         applyAdvancedSettingsFromUi();
     }
+    refreshAutoDepthUi();
 }
 
 
@@ -2117,6 +2409,10 @@ void MainWindow::onCancelAiClicked()
         ui->btnCancelAi->setEnabled(false);
     }
     if (aiVsAiRunning_ || aiVsAiStepBusy_) {
+        aiCancelFlag_.store(true, std::memory_order_relaxed);
+        ui->btnCancelAi->setEnabled(false);
+    }
+    if (openingInProgress_) {
         aiCancelFlag_.store(true, std::memory_order_relaxed);
         ui->btnCancelAi->setEnabled(false);
     }

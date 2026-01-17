@@ -63,6 +63,22 @@ enum class Swap2Option {
     PlaceTwoAndGiveChoice
 };
 
+class OpeningDecision {
+public:
+    OpeningPhase phase = OpeningPhase::Normal;
+    bool valid = false;
+
+    bool pieSwap = false;
+
+    Swap2Option swap2Option = Swap2Option::TakeX;
+    Player swap2FinalSideA = Player::X;
+
+    Player swap2PlusSideB = Player::X;
+    Player swap2PlusFinalSideA = Player::X;
+
+    std::string actionText;
+};
+
 
 class AIVsAIMoveInfo {
 public:
@@ -299,8 +315,6 @@ public:
         std::lock_guard<std::recursive_mutex> lk(stateMutex_);
         return board_;
     }
-    const Board& board() const { return board_; }
-    Board& board() { return board_; }
 
     GameMode mode() const {
         std::lock_guard<std::recursive_mutex> lk(stateMutex_);
@@ -441,63 +455,190 @@ public:
         return creditedLinesO_ - creditedLinesX_;
     }
 
-    bool autoResolveOpeningChoiceForCurrentAI(int depthHint, bool memoHint, std::atomic<bool>* cancelFlag = nullptr) {
-        if (openingPhase_ == OpeningPhase::Normal) return false;
-
-        Seat chooser = seatToMove_;
-        Player seatSide = sideOf(chooser);
-
-        SearchParams params = makeOpeningParams(depthHint, memoHint);
-        OpeningTimeScope scope(*this, OPENING_TOTAL_LIMIT_MS);
-
-        if (openingPhase_ == OpeningPhase::Pie_OfferSwap) {
-            Player toMove = currentPlayer_;
-            int stayScore = evaluateForSeat(board_, toMove, seatSide, creditedLinesX_, creditedLinesO_, params, cancelFlag);
-            Player swappedSide = (seatSide == Player::X) ? Player::O : Player::X;
-            int swapScore = evaluateForSeat(board_, toMove, swappedSide, creditedLinesX_, creditedLinesO_, params, cancelFlag);
-            return choosePieSwap(swapScore > stayScore);
+    OpeningDecision computeOpeningDecisionForCurrentSeatAI(int depthHint,
+                                                           bool memoHint,
+                                                           int timeLimitMs,
+                                                           std::atomic<bool>* cancelFlag) const
+    {
+        OpeningDecision decision;
+        OpeningPhase phaseSnapshot = OpeningPhase::Normal;
+        Seat seatToMoveSnapshot = Seat::A;
+        Seat seatXSnapshot = Seat::A;
+        Seat seatOSnapshot = Seat::B;
+        Player currentPlayerSnapshot = Player::X;
+        int scoreXSnapshot = 0;
+        int scoreOSnapshot = 0;
+        Board boardSnapshot;
+        {
+            std::lock_guard<std::recursive_mutex> lk(stateMutex_);
+            phaseSnapshot = openingPhase_;
+            seatToMoveSnapshot = seatToMove_;
+            seatXSnapshot = seatX_;
+            seatOSnapshot = seatO_;
+            currentPlayerSnapshot = currentPlayer_;
+            scoreXSnapshot = creditedLinesX_;
+            scoreOSnapshot = creditedLinesO_;
+            boardSnapshot = board_;
         }
 
-        if (openingPhase_ == OpeningPhase::Swap2_B_ChooseOption) {
-            int takeX = evaluateSwap2OptionTakeX(board_, creditedLinesX_, creditedLinesO_, params, cancelFlag);
-            int extraO = evaluateSwap2OptionExtraO(board_, creditedLinesX_, creditedLinesO_, params, cancelFlag);
-            int placeTwo = evaluateSwap2BPlaceTwoValue(board_, creditedLinesX_, creditedLinesO_, params, cancelFlag);
-            Swap2Option opt = Swap2Option::TakeX;
+        decision.phase = phaseSnapshot;
+        if (phaseSnapshot == OpeningPhase::Normal) {
+            return decision;
+        }
+
+        SearchParams params = makeOpeningParams(depthHint, memoHint);
+        int effectiveLimitMs = timeLimitMs > 0
+            ? std::min(timeLimitMs, OPENING_TOTAL_LIMIT_MS)
+            : OPENING_TOTAL_LIMIT_MS;
+        OpeningTimeScope scope(*this, effectiveLimitMs);
+
+        auto sideOfSeat = [&](Seat s) {
+            return (s == seatXSnapshot) ? Player::X : Player::O;
+        };
+
+        if (phaseSnapshot == OpeningPhase::Pie_OfferSwap) {
+            Player seatSide = sideOfSeat(seatToMoveSnapshot);
+            int stayScore = evaluateForSeat(boardSnapshot, currentPlayerSnapshot, seatSide,
+                                            scoreXSnapshot, scoreOSnapshot, params, cancelFlag);
+            Player swappedSide = (seatSide == Player::X) ? Player::O : Player::X;
+            int swapScore = evaluateForSeat(boardSnapshot, currentPlayerSnapshot, swappedSide,
+                                            scoreXSnapshot, scoreOSnapshot, params, cancelFlag);
+            decision.pieSwap = (swapScore > stayScore);
+            decision.valid = true;
+            decision.actionText = decision.pieSwap
+                ? "Поменялся сторонами (Pie-swap)"
+                : "Оставил стороны (Pie-swap)";
+            return decision;
+        }
+
+        if (phaseSnapshot == OpeningPhase::Swap2_B_ChooseOption) {
+            int takeX = evaluateSwap2OptionTakeX(boardSnapshot, scoreXSnapshot, scoreOSnapshot, params, cancelFlag);
+            int extraO = evaluateSwap2OptionExtraO(boardSnapshot, scoreXSnapshot, scoreOSnapshot, params, cancelFlag);
+            int placeTwo = evaluateSwap2BPlaceTwoValue(boardSnapshot, scoreXSnapshot, scoreOSnapshot, params, cancelFlag);
+            decision.swap2Option = Swap2Option::TakeX;
             int best = takeX;
+            decision.actionText = "Взял X (Swap2)";
             if (extraO > best) {
                 best = extraO;
-                opt = Swap2Option::TakeO_AndPlaceExtraO;
+                decision.swap2Option = Swap2Option::TakeO_AndPlaceExtraO;
+                decision.actionText = "Взял O + доп. O (Swap2)";
             }
             if (placeTwo > best) {
                 best = placeTwo;
-                opt = Swap2Option::PlaceTwoAndGiveChoice;
+                decision.swap2Option = Swap2Option::PlaceTwoAndGiveChoice;
+                decision.actionText = "Поставил 2 и дал выбор (Swap2)";
             }
-            return chooseSwap2Option(opt);
+            decision.valid = true;
+            return decision;
         }
 
-        if (openingPhase_ == OpeningPhase::Swap2_A_FinalChooseSide) {
-            Player toMove = currentPlayer_;
-            int scoreX = evaluateForSeat(board_, toMove, Player::X, creditedLinesX_, creditedLinesO_, params, cancelFlag);
-            int scoreO = evaluateForSeat(board_, toMove, Player::O, creditedLinesX_, creditedLinesO_, params, cancelFlag);
-            return chooseSwap2FinalSide(scoreX >= scoreO ? Player::X : Player::O);
+        if (phaseSnapshot == OpeningPhase::Swap2_A_FinalChooseSide) {
+            int scoreX = evaluateForSeat(boardSnapshot, currentPlayerSnapshot, Player::X,
+                                         scoreXSnapshot, scoreOSnapshot, params, cancelFlag);
+            int scoreO = evaluateForSeat(boardSnapshot, currentPlayerSnapshot, Player::O,
+                                         scoreXSnapshot, scoreOSnapshot, params, cancelFlag);
+            decision.swap2FinalSideA = (scoreX >= scoreO) ? Player::X : Player::O;
+            decision.actionText = (decision.swap2FinalSideA == Player::X)
+                ? "Игрок A выбрал X (Swap2)"
+                : "Игрок A выбрал O (Swap2)";
+            decision.valid = true;
+            return decision;
         }
 
-        if (openingPhase_ == OpeningPhase::Swap2P_B_ChooseSide) {
-            int bestX = evaluateSwap2PlusBestForBChosenSide(board_, creditedLinesX_, creditedLinesO_, Player::X, params, cancelFlag);
-            int bestO = evaluateSwap2PlusBestForBChosenSide(board_, creditedLinesX_, creditedLinesO_, Player::O, params, cancelFlag);
-            Player choice = (bestX >= bestO) ? Player::X : Player::O;
-            return chooseSwap2PlusSideB(choice);
+        if (phaseSnapshot == OpeningPhase::Swap2P_B_ChooseSide) {
+            int bestX = evaluateSwap2PlusBestForBChosenSide(boardSnapshot, scoreXSnapshot, scoreOSnapshot,
+                                                           Player::X, params, cancelFlag);
+            int bestO = evaluateSwap2PlusBestForBChosenSide(boardSnapshot, scoreXSnapshot, scoreOSnapshot,
+                                                           Player::O, params, cancelFlag);
+            decision.swap2PlusSideB = (bestX >= bestO) ? Player::X : Player::O;
+            decision.actionText = (decision.swap2PlusSideB == Player::X)
+                ? "Игрок B выбрал X (Swap2+)"
+                : "Игрок B выбрал O (Swap2+)";
+            decision.valid = true;
+            return decision;
         }
 
-        if (openingPhase_ == OpeningPhase::Swap2P_A_FinalChooseSide) {
-            Player toMove = currentPlayer_;
-            int scoreX = evaluateForSeat(board_, toMove, Player::X, creditedLinesX_, creditedLinesO_, params, cancelFlag);
-            int scoreO = evaluateForSeat(board_, toMove, Player::O, creditedLinesX_, creditedLinesO_, params, cancelFlag);
-            Player choice = (scoreX >= scoreO) ? Player::X : Player::O;
-            return chooseSwap2PlusFinalSideA(choice);
+        if (phaseSnapshot == OpeningPhase::Swap2P_A_FinalChooseSide) {
+            int scoreX = evaluateForSeat(boardSnapshot, currentPlayerSnapshot, Player::X,
+                                         scoreXSnapshot, scoreOSnapshot, params, cancelFlag);
+            int scoreO = evaluateForSeat(boardSnapshot, currentPlayerSnapshot, Player::O,
+                                         scoreXSnapshot, scoreOSnapshot, params, cancelFlag);
+            decision.swap2PlusFinalSideA = (scoreX >= scoreO) ? Player::X : Player::O;
+            decision.actionText = (decision.swap2PlusFinalSideA == Player::X)
+                ? "Игрок A выбрал X (Swap2+)"
+                : "Игрок A выбрал O (Swap2+)";
+            decision.valid = true;
+            return decision;
         }
 
+        return decision;
+    }
+
+    bool applyOpeningDecision(const OpeningDecision& d) {
+        if (!d.valid) return false;
+        if (openingPhase() != d.phase) return false;
+
+        switch (d.phase) {
+        case OpeningPhase::Pie_OfferSwap:
+            return choosePieSwap(d.pieSwap);
+        case OpeningPhase::Swap2_B_ChooseOption:
+            return chooseSwap2Option(d.swap2Option);
+        case OpeningPhase::Swap2_A_FinalChooseSide:
+            return chooseSwap2FinalSide(d.swap2FinalSideA);
+        case OpeningPhase::Swap2P_B_ChooseSide:
+            return chooseSwap2PlusSideB(d.swap2PlusSideB);
+        case OpeningPhase::Swap2P_A_FinalChooseSide:
+            return chooseSwap2PlusFinalSideA(d.swap2PlusFinalSideA);
+        default:
+            break;
+        }
         return false;
+    }
+
+    bool autoResolveOpeningChoiceForCurrentAI(int depthHint,
+                                              bool memoHint,
+                                              std::atomic<bool>* cancelFlag = nullptr,
+                                              int timeLimitMs = -1)
+    {
+        OpeningPhase phaseSnapshot = OpeningPhase::Normal;
+        Seat seatToMoveSnapshot = Seat::A;
+        Player currentPlayerSnapshot = Player::X;
+        OpeningRule openingRuleSnapshot = OpeningRule::None;
+
+        {
+            std::lock_guard<std::recursive_mutex> lk(stateMutex_);
+            if (gameOver_) return false;
+            if (cancelFlag && cancelFlag->load(std::memory_order_relaxed)) return false;
+            if (!(openingPhase_ == OpeningPhase::Pie_OfferSwap ||
+                  openingPhase_ == OpeningPhase::Swap2_B_ChooseOption ||
+                  openingPhase_ == OpeningPhase::Swap2_A_FinalChooseSide ||
+                  openingPhase_ == OpeningPhase::Swap2P_B_ChooseSide ||
+                  openingPhase_ == OpeningPhase::Swap2P_A_FinalChooseSide)) {
+                return false;
+            }
+            phaseSnapshot = openingPhase_;
+            seatToMoveSnapshot = seatToMove_;
+            currentPlayerSnapshot = currentPlayer_;
+            openingRuleSnapshot = openingRule_;
+        }
+
+        if (cancelFlag && cancelFlag->load(std::memory_order_relaxed)) return false;
+        OpeningDecision decision = computeOpeningDecisionForCurrentSeatAI(depthHint, memoHint, timeLimitMs, cancelFlag);
+        if (!decision.valid) return false;
+        if (cancelFlag && cancelFlag->load(std::memory_order_relaxed)) return false;
+
+        {
+            std::lock_guard<std::recursive_mutex> lk(stateMutex_);
+            if (openingPhase_ != phaseSnapshot ||
+                seatToMove_ != seatToMoveSnapshot ||
+                currentPlayer_ != currentPlayerSnapshot ||
+                openingRule_ != openingRuleSnapshot) {
+                return false;
+            }
+        }
+
+        if (cancelFlag && cancelFlag->load(std::memory_order_relaxed)) return false;
+        return applyOpeningDecision(decision);
     }
 
     
@@ -865,6 +1006,7 @@ public:
             params.setUseLMR(useLMR_);
             params.setUseExtensions(useExtensions_);
             params.setPerfectClassic3(perfectClassic3_);
+            params.setBanCenterFirstMove(openingRule_ == OpeningRule::None);
             params.setTimeLimitMs(timeLimitMs);
             AnalysisResult res = analysePosition(board_, sideToMove, mode_, params,
                                                  creditedLinesX_, creditedLinesO_,
@@ -905,6 +1047,7 @@ public:
         ai.setUseLMR(useLMR_);
         ai.setUseExtensions(useExtensions_);
         ai.setPerfectClassic3(perfectClassic3_);
+        ai.setBanCenterFirstMove(openingRule_ == OpeningRule::None);
 
         if (openingRule_ == OpeningRule::PieSwap &&
             mode_ == GameMode::LinesScore &&
@@ -1270,6 +1413,7 @@ private:
         params.setUseLMR(useLMR_);
         params.setUseExtensions(useExtensions_);
         params.setPerfectClassic3(perfectClassic3_);
+        params.setBanCenterFirstMove(openingRule_ == OpeningRule::None);
         params.setTimeLimitMs(OPENING_ANALYSIS_LIMIT_MS);
         return params;
     }

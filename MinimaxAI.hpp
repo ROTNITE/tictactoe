@@ -48,7 +48,14 @@ public:
     size_t nodesGenerated; 
     size_t cacheHits;      
     size_t cacheMisses;    
+    uint64_t nodes;
+    uint64_t ttProbes;
+    uint64_t ttHits;
+    uint64_t ttCutoffs;
+    uint64_t generatedMoves;
+    uint64_t expandedMoves;
     long long timeMs;      
+    double elapsedMs;
     int completedDepth;    
 
     AIStatistics()
@@ -56,7 +63,14 @@ public:
         nodesGenerated(0),
         cacheHits(0),
         cacheMisses(0),
+        nodes(0),
+        ttProbes(0),
+        ttHits(0),
+        ttCutoffs(0),
+        generatedMoves(0),
+        expandedMoves(0),
         timeMs(0),
+        elapsedMs(0.0),
         completedDepth(0) {}
 
     void reset() {
@@ -64,7 +78,14 @@ public:
         nodesGenerated = 0;
         cacheHits = 0;
         cacheMisses = 0;
+        nodes = 0;
+        ttProbes = 0;
+        ttHits = 0;
+        ttCutoffs = 0;
+        generatedMoves = 0;
+        expandedMoves = 0;
         timeMs = 0;
+        elapsedMs = 0.0;
         completedDepth = 0;
     }
 
@@ -108,7 +129,8 @@ private:
     uint64_t zobristPlayerO_ = 0;
     int timeLimitMs_ = -1;
     std::chrono::steady_clock::time_point startTime_;
-    struct WindowInfo {
+    class WindowInfo {
+    public:
         int row = 0;
         int col = 0;
         int dr = 0;
@@ -129,8 +151,10 @@ private:
     GameMode evalMode_ = GameMode::Classic;
     MoveGenMode moveGenMode_ = MoveGenMode::Hybrid;
     bool useLMR_ = true;
+    bool enableLMRLines_ = false;
     bool useExtensions_ = true;
     bool perfectClassic3_ = false;
+    bool banCenterFirstMove_ = false;
     bool allowOpeningShortcut_ = true;
 
     class TTEntry {
@@ -465,9 +489,160 @@ private:
         return evaluateHeuristicLines(board, scoreX, scoreO);
     }
 
-    DynamicArray<Coord> getSearchMoves(const Board& board, int depth) const {
+    void appendUnique(DynamicArray<Coord>& list, const Coord& mv) const {
+        for (size_t i = 0; i < list.size(); ++i) {
+            if (list[i] == mv) return;
+        }
+        list.push_back(mv);
+    }
+
+    int countFilledCapped(const Board& board, int cap) const {
         int rows = board.getRows();
         int cols = board.getCols();
+        int filled = 0;
+        for (int row = 0; row < rows; ++row) {
+            for (int col = 0; col < cols; ++col) {
+                if (board.getNoCheck(row, col) != CellState::Empty) {
+                    ++filled;
+                    if (filled >= cap) return filled;
+                }
+            }
+        }
+        return filled;
+    }
+
+    void addCenterRegionMoves(DynamicArray<Coord>& moves, const Board& board, int radius) const {
+        int rows = board.getRows();
+        int cols = board.getCols();
+        int centerRowLow = (rows - 1) / 2;
+        int centerRowHigh = rows / 2;
+        int centerColLow = (cols - 1) / 2;
+        int centerColHigh = cols / 2;
+        int r0 = std::max(0, centerRowLow - radius);
+        int r1 = std::min(rows - 1, centerRowHigh + radius);
+        int c0 = std::max(0, centerColLow - radius);
+        int c1 = std::min(cols - 1, centerColHigh + radius);
+        for (int row = r0; row <= r1; ++row) {
+            for (int col = c0; col <= c1; ++col) {
+                if (!board.isEmpty(row, col)) continue;
+                appendUnique(moves, Coord(row, col));
+            }
+        }
+    }
+
+    DynamicArray<Coord> getSearchMovesLines(Board& board,
+                                            int depth,
+                                            Player currentPlayer,
+                                            DynamicArray<Coord>* mustPlayOut) {
+        DynamicArray<Coord> mustPlay;
+        DynamicArray<Coord> moves;
+        (void)depth;
+        int rows = board.getRows();
+        int cols = board.getCols();
+        int filled = countFilledCapped(board, 5);
+        bool empty = (filled == 0);
+
+        int radius = 1;
+        if (filled <= 2) radius = 3;
+        else if (filled <= 4) radius = 2;
+        else radius = 1;
+        if (moveGenMode_ == MoveGenMode::Frontier) {
+            radius = 1;
+        }
+
+        if (empty) {
+            int useRadius = std::min(radius, 3);
+            addCenterRegionMoves(moves, board, useRadius);
+            if (banCenterFirstMove_ && currentPlayer == Player::X &&
+                (rows % 2 == 1) && (cols % 2 == 1)) {
+                int cr = rows / 2;
+                int cc = cols / 2;
+                DynamicArray<Coord> filtered;
+                filtered.reserve(moves.size());
+                for (size_t i = 0; i < moves.size(); ++i) {
+                    if (moves[i].row() == cr && moves[i].col() == cc) continue;
+                    filtered.push_back(moves[i]);
+                }
+                moves = std::move(filtered);
+            }
+            if (mustPlayOut) *mustPlayOut = mustPlay;
+            return moves;
+        }
+
+        if (!evalReady_ || rows != evalRows_ || cols != evalCols_ ||
+            board.getWinLength() != evalWinLen_ || evalMode_ != mode_) {
+            initEvalCache(board);
+        }
+
+        DynamicArray<Coord> pool = board.getCandidateMoves(1);
+        if (radius >= 2) {
+            DynamicArray<Coord> wider = board.getCandidateMoves(2);
+            for (size_t i = 0; i < wider.size(); ++i) {
+                appendUnique(pool, wider[i]);
+            }
+        }
+
+        int winLen = board.getWinLength();
+        int64_t nearLineThreshold = 0;
+        if (winLen - 1 >= 1 && static_cast<size_t>(winLen - 1) < windowWeight_.size()) {
+            nearLineThreshold = windowWeight_[winLen - 1];
+        }
+
+        CellState curCell = playerToCell(currentPlayer);
+        CellState oppCell = playerToCell(getOpponent(currentPlayer));
+        for (size_t i = 0; i < pool.size(); ++i) {
+            const Coord& mv = pool[i];
+            if (!board.isEmpty(mv.row(), mv.col())) continue;
+            int64_t baseScore = windowScoreSum_ + centerBias_;
+
+            int gainedSelf = applyMoveEval(board, mv, curCell);
+            int64_t deltaSelf = std::llabs((windowScoreSum_ + centerBias_) - baseScore);
+            undoMoveEval(board, mv, curCell);
+
+            int gainedOpp = applyMoveEval(board, mv, oppCell);
+            int64_t deltaOpp = std::llabs((windowScoreSum_ + centerBias_) - baseScore);
+            undoMoveEval(board, mv, oppCell);
+
+            if (gainedSelf >= 1 || gainedOpp >= 1 ||
+                (nearLineThreshold > 0 && (deltaSelf >= nearLineThreshold || deltaOpp >= nearLineThreshold))) {
+                appendUnique(mustPlay, mv);
+            }
+        }
+
+        if (moveGenMode_ == MoveGenMode::Full) {
+            moves = board.getEmptyCells();
+        } else {
+            if (radius == 1) {
+                moves = board.getCandidateMoves(1);
+            } else if (radius == 2) {
+                moves = board.getCandidateMoves(2);
+            } else {
+                moves = board.getCandidateMoves(3);
+            }
+        }
+
+        DynamicArray<Coord> combined;
+        combined.reserve(mustPlay.size() + moves.size());
+        for (size_t i = 0; i < mustPlay.size(); ++i) {
+            appendUnique(combined, mustPlay[i]);
+        }
+        for (size_t i = 0; i < moves.size(); ++i) {
+            appendUnique(combined, moves[i]);
+        }
+
+        if (mustPlayOut) *mustPlayOut = mustPlay;
+        return combined;
+    }
+
+    DynamicArray<Coord> getSearchMoves(Board& board,
+                                       int depth,
+                                       Player currentPlayer,
+                                       DynamicArray<Coord>* mustPlayOut = nullptr) {
+        int rows = board.getRows();
+        int cols = board.getCols();
+        if (mode_ == GameMode::LinesScore && moveGenMode_ != MoveGenMode::Full) {
+            return getSearchMovesLines(board, depth, currentPlayer, mustPlayOut);
+        }
         if (rows <= 4 && cols <= 4) {
             return board.getEmptyCells();
         }
@@ -493,7 +668,7 @@ private:
                 int c1 = std::min(cols - 1, centerColHigh + radius);
                 DynamicArray<Coord> moves;
                 moves.reserve(static_cast<size_t>((r1 - r0 + 1) * (c1 - c0 + 1)));
-                bool banCenter = (mode_ == GameMode::LinesScore && player_ == Player::X &&
+                bool banCenter = (banCenterFirstMove_ && currentPlayer == Player::X &&
                                   (rows % 2 == 1) && (cols % 2 == 1));
                 int cr = rows / 2;
                 int cc = cols / 2;
@@ -536,6 +711,7 @@ private:
     int minimax(Board& board, int depth, int alpha, int beta, Player currentPlayer, bool isMaximizing, uint64_t hashKey, const Coord& lastMove, int scoreX, int scoreO, int extensionBudget) {
 
         stats_.nodesVisited++;
+        stats_.nodes++;
 
         if (isCancelled()) {
             return evaluateHeuristic(board, scoreX, scoreO);
@@ -590,13 +766,16 @@ private:
         
         if (useMemoization_) {
             size_t key = makeHashKey(hashKey, rows, cols, winLen, scoreX, scoreO);
+            stats_.ttProbes++;
             if (transpositionTable_.contains(key)) {
                 const TTEntry& e = transpositionTable_.get(key);
                 if (e.generation != ttGeneration_) {
                     stats_.cacheMisses++;
                 } else if (e.depth >= depth) {
                     stats_.cacheHits++;
+                    stats_.ttHits++;
                     if (e.flag == TTEntry::Flag::Exact) {
+                        stats_.ttCutoffs++;
                         return e.score;
                     } else if (e.flag == TTEntry::Flag::Lower && e.score > alpha) {
                         alpha = e.score;
@@ -604,6 +783,7 @@ private:
                         beta = e.score;
                     }
                     if (alpha >= beta) {
+                        stats_.ttCutoffs++;
                         return e.score;
                     }
                     if (e.bestMove.move.row() >= 0 && e.bestMove.move.col() >= 0) {
@@ -617,8 +797,10 @@ private:
             }
         }
 
-        DynamicArray<Coord> moves = getSearchMoves(board, depth);
+        DynamicArray<Coord> mustPlay;
+        DynamicArray<Coord> moves = getSearchMoves(board, depth, currentPlayer, &mustPlay);
         stats_.nodesGenerated += moves.size();
+        stats_.generatedMoves += moves.size();
 
         Coord ttHint(-1, -1);
         
@@ -634,11 +816,21 @@ private:
             }
         }
 
+        auto isMustPlayMove = [&](const Coord& mv) -> bool {
+            for (size_t i = 0; i < mustPlay.size(); ++i) {
+                if (mustPlay[i] == mv) return true;
+            }
+            return false;
+        };
+
         auto moveUrgency = [&](const Coord& mv, bool heavy) -> int {
             int bonus = 0;
             Board& b = board;
             CellState curCell = playerToCell(currentPlayer);
             CellState oppCell = playerToCell(getOpponent(currentPlayer));
+            if (!mustPlay.empty() && isMustPlayMove(mv)) {
+                bonus += 20000;
+            }
             if (heavy) {
                 if (mode_ == GameMode::LinesScore) {
                     int gainedSelf = applyMoveEval(b, mv, curCell);
@@ -746,30 +938,89 @@ private:
 
         int       bestScore;
         CellState currentCell = playerToCell(currentPlayer);
+        CellState opponentCell = playerToCell(getOpponent(currentPlayer));
         Coord bestMoveCoord(-1, -1);
-        size_t maxMoves = moves.size();
+        size_t cap = moves.size();
         int area = rows * cols;
         if (area >= 64) {
-            size_t cap = depth >= 6 ? static_cast<size_t>(24) : static_cast<size_t>(32);
-            if (maxMoves > cap) maxMoves = cap;
+            size_t areaCap = depth >= 6 ? static_cast<size_t>(24) : static_cast<size_t>(32);
+            if (cap > areaCap) cap = areaCap;
         }
         if (useLMR_ && timeLimitMs_ > 0 && depth >= 8 && moves.size() > 1) {
-            size_t cap = static_cast<size_t>(std::max(24, winLen * 6));
-            if (maxMoves > cap) maxMoves = cap;
+            size_t lmrCap = static_cast<size_t>(std::max(24, winLen * 6));
+            if (cap > lmrCap) cap = lmrCap;
         }
+        if (cap < moves.size()) {
+            DynamicArray<Coord> trimmedMoves;
+            DynamicArray<int> trimmedUrgencies;
+            trimmedMoves.reserve(std::min(moves.size(), cap + mustPlay.size()));
+            trimmedUrgencies.reserve(std::min(urgencies.size(), cap + mustPlay.size()));
+
+            for (size_t i = 0; i < moves.size(); ++i) {
+                if (!isMustPlayMove(moves[i])) continue;
+                trimmedMoves.push_back(moves[i]);
+                trimmedUrgencies.push_back(urgencies[i]);
+            }
+
+            if (mustPlay.size() < cap) {
+                for (size_t i = 0; i < moves.size(); ++i) {
+                    if (isMustPlayMove(moves[i])) continue;
+                    trimmedMoves.push_back(moves[i]);
+                    trimmedUrgencies.push_back(urgencies[i]);
+                    if (trimmedMoves.size() >= cap) break;
+                }
+            }
+            moves = std::move(trimmedMoves);
+            urgencies = std::move(trimmedUrgencies);
+        }
+        size_t maxMoves = moves.size();
+        stats_.expandedMoves += maxMoves;
+        int64_t quietThreshold = 0;
+        if (mode_ == GameMode::LinesScore && enableLMRLines_) {
+            if (winLen - 1 >= 1 && static_cast<size_t>(winLen - 1) < windowWeight_.size()) {
+                quietThreshold = windowWeight_[winLen - 1] / 2;
+            } else if (windowWeight_.size() > 1) {
+                quietThreshold = windowWeight_[1];
+            }
+        }
+        static constexpr size_t LMR_START = 8;
 
         if (isMaximizing) {
             bestScore = std::numeric_limits<int>::min();
 
             for (size_t i = 0; i < maxMoves; ++i) {
-                int gained = applyMoveEval(board, moves[i], currentCell);
                 int nextDepth = depth - 1;
                 int nextExtensionBudget = extensionBudget;
                 int urgency = (i < urgencies.size()) ? urgencies[i] : moveUrgency(moves[i], false);
+                bool considerLmrLines = (mode_ == GameMode::LinesScore &&
+                                         useLMR_ && enableLMRLines_ && timeLimitMs_ > 0 &&
+                                         depth >= 8 && moves.size() > 12 &&
+                                         i >= LMR_START && urgency < 4000 &&
+                                         !isMustPlayMove(moves[i]));
+                int64_t baseScore = 0;
+                int gainedOpp = 0;
+                if (considerLmrLines) {
+                    baseScore = windowScoreSum_ + centerBias_;
+                    gainedOpp = applyMoveEval(board, moves[i], opponentCell);
+                    undoMoveEval(board, moves[i], opponentCell);
+                }
+                int gained = applyMoveEval(board, moves[i], currentCell);
                 bool tactical = (mode_ == GameMode::LinesScore && gained > 0) || urgency >= 3000;
                 if (useExtensions_ && tactical && mode_ == GameMode::LinesScore && gained > 0 && depth <= 6 && extensionBudget > 0) {
                     nextDepth = depth;
                     nextExtensionBudget = extensionBudget - 1;
+                } else if (mode_ == GameMode::LinesScore) {
+                    if (considerLmrLines && quietThreshold > 0) {
+                        int64_t deltaScore = std::llabs((windowScoreSum_ + centerBias_) - baseScore);
+                        bool quiet = (gained == 0 && deltaScore < quietThreshold && gainedOpp == 0);
+                        if (quiet) {
+                            nextDepth = depth - 2;
+                            if (depth >= 10 && moves.size() > 18 && i > 14 && urgency < 2000) {
+                                nextDepth = depth - 3;
+                            }
+                            if (nextDepth < 1) nextDepth = 1;
+                        }
+                    }
                 } else if (useLMR_ && !tactical && timeLimitMs_ > 0 && depth >= 8 && moves.size() > 12 && i > 8 && urgency < 4000) {
                     nextDepth = depth - 2;
                     if (depth >= 10 && moves.size() > 18 && i > 14 && urgency < 2000) {
@@ -829,14 +1080,38 @@ private:
             bestScore = std::numeric_limits<int>::max();
 
             for (size_t i = 0; i < maxMoves; ++i) {
-                int gained = applyMoveEval(board, moves[i], currentCell);
                 int nextDepth = depth - 1;
                 int nextExtensionBudget = extensionBudget;
                 int urgency = (i < urgencies.size()) ? urgencies[i] : moveUrgency(moves[i], false);
+                bool considerLmrLines = (mode_ == GameMode::LinesScore &&
+                                         useLMR_ && enableLMRLines_ && timeLimitMs_ > 0 &&
+                                         depth >= 8 && moves.size() > 12 &&
+                                         i >= LMR_START && urgency < 4000 &&
+                                         !isMustPlayMove(moves[i]));
+                int64_t baseScore = 0;
+                int gainedOpp = 0;
+                if (considerLmrLines) {
+                    baseScore = windowScoreSum_ + centerBias_;
+                    gainedOpp = applyMoveEval(board, moves[i], opponentCell);
+                    undoMoveEval(board, moves[i], opponentCell);
+                }
+                int gained = applyMoveEval(board, moves[i], currentCell);
                 bool tactical = (mode_ == GameMode::LinesScore && gained > 0) || urgency >= 3000;
                 if (useExtensions_ && tactical && mode_ == GameMode::LinesScore && gained > 0 && depth <= 6 && extensionBudget > 0) {
                     nextDepth = depth;
                     nextExtensionBudget = extensionBudget - 1;
+                } else if (mode_ == GameMode::LinesScore) {
+                    if (considerLmrLines && quietThreshold > 0) {
+                        int64_t deltaScore = std::llabs((windowScoreSum_ + centerBias_) - baseScore);
+                        bool quiet = (gained == 0 && deltaScore < quietThreshold && gainedOpp == 0);
+                        if (quiet) {
+                            nextDepth = depth - 2;
+                            if (depth >= 10 && moves.size() > 18 && i > 14 && urgency < 2000) {
+                                nextDepth = depth - 3;
+                            }
+                            if (nextDepth < 1) nextDepth = 1;
+                        }
+                    }
                 } else if (useLMR_ && !tactical && timeLimitMs_ > 0 && depth >= 8 && moves.size() > 12 && i > 8 && urgency < 4000) {
                     nextDepth = depth - 2;
                     if (depth >= 10 && moves.size() > 18 && i > 14 && urgency < 2000) {
@@ -964,7 +1239,11 @@ public:
         if (maxEntries < 200000) maxEntries = 200000;
         if (maxEntries > 2000000) maxEntries = 2000000;
         if (transpositionTable_.size() > maxEntries) {
-            transpositionTable_.clear();
+            if (transpositionTable_.size() > maxEntries * 2) {
+                transpositionTable_.reset();
+            } else {
+                transpositionTable_.clear();
+            }
             ttGeneration_ = 1;
         }
         int totalCells = rows * cols;
@@ -975,26 +1254,37 @@ public:
             if (remaining > searchDepth) searchDepth = remaining;
         }
 
-        DynamicArray<Coord> moves = getSearchMoves(board, searchDepth);
-        if (moves.size() == static_cast<size_t>(totalCells)) {
+        DynamicArray<Coord> mustPlay;
+        DynamicArray<Coord> moves = getSearchMoves(board, searchDepth, player_, &mustPlay);
+        bool emptyBoard = (countFilledCapped(board, 1) == 0);
+        if (emptyBoard) {
             int centerRow = rows / 2;
             int centerCol = cols / 2;
             bool hasCenter = (rows % 2 == 1) && (cols % 2 == 1);
+            bool banCenter = banCenterFirstMove_ && player_ == Player::X && hasCenter;
 
-            if (mode_ == GameMode::LinesScore &&
-                player_ == Player::X &&
-                hasCenter)
-            {
-                DynamicArray<Coord> filtered;
+            DynamicArray<Coord> filtered;
+            if (banCenter) {
                 filtered.reserve(moves.size());
-                Coord bestMove(-1, -1);
-                int bestScore = std::numeric_limits<int>::min();
                 for (size_t i = 0; i < moves.size(); ++i) {
                     if (moves[i].row() == centerRow &&
                         moves[i].col() == centerCol) {
                         continue;
                     }
                     filtered.push_back(moves[i]);
+                }
+                if (!filtered.empty()) {
+                    moves = std::move(filtered);
+                }
+            }
+
+            if (mode_ == GameMode::LinesScore &&
+                player_ == Player::X &&
+                hasCenter)
+            {
+                Coord bestMove(-1, -1);
+                int bestScore = std::numeric_limits<int>::min();
+                for (size_t i = 0; i < moves.size(); ++i) {
                     int dist = std::abs(moves[i].row() - centerRow)
                                + std::abs(moves[i].col() - centerCol);
                     int nearScore = 0;
@@ -1020,14 +1310,18 @@ public:
                     stats_.timeMs = 0;
                     return MoveEvaluation(bestMove, 0);
                 }
-                if (!filtered.empty()) {
-                    moves = std::move(filtered);
-                }
             }
 
             if (mode_ == GameMode::Classic && rows == 3 && cols == 3) {
-                stats_.timeMs = 0;
-                return MoveEvaluation(Coord(centerRow, centerCol), 0);
+                if (banCenter) {
+                    if (allowOpeningShortcut_) {
+                        stats_.timeMs = 0;
+                        return MoveEvaluation(Coord(0, 0), 0);
+                    }
+                } else {
+                    stats_.timeMs = 0;
+                    return MoveEvaluation(Coord(centerRow, centerCol), 0);
+                }
             }
         }
         if (moves.empty()) {
@@ -1056,6 +1350,13 @@ public:
             bestSoFarPtr_->move = Coord(-1, -1);
         }
 
+        auto isMustPlayMove = [&](const Coord& mv) -> bool {
+            for (size_t i = 0; i < mustPlay.size(); ++i) {
+                if (mustPlay[i] == mv) return true;
+            }
+            return false;
+        };
+
         auto moveScore = [&](const Coord& mv) {
             int centerRow = rows / 2;
             int centerCol = cols / 2;
@@ -1073,10 +1374,14 @@ public:
                     }
                 }
             }
+            int bonus = 0;
+            if (!mustPlay.empty() && isMustPlayMove(mv)) {
+                bonus += 20000;
+            }
             int hist = 0;
             int idx = mv.row() * cols + mv.col();
             if (idx >= 0 && idx < static_cast<int>(history.size())) hist = history[idx];
-            return -dist * 3 + nearScore + hist;
+            return -dist * 3 + nearScore + hist + bonus;
         };
 
         auto orderMoves = [&](DynamicArray<Coord>& list, const MoveEvaluation& pv) {
@@ -1142,6 +1447,7 @@ public:
                                 worker.startTime_ = startTime_;
                                 worker.moveGenMode_ = moveGenMode_;
                                 worker.useLMR_ = useLMR_;
+                                worker.enableLMRLines_ = enableLMRLines_;
                                 worker.useExtensions_ = useExtensions_;
                                 worker.perfectClassic3_ = perfectClassic3_;
                                 for (int d = 0; d < MAX_KILLER_DEPTH; ++d) {
@@ -1184,6 +1490,12 @@ public:
                             stats_.nodesGenerated += r.stats.nodesGenerated;
                             stats_.cacheHits     += r.stats.cacheHits;
                             stats_.cacheMisses   += r.stats.cacheMisses;
+                            stats_.nodes         += r.stats.nodes;
+                            stats_.ttProbes      += r.stats.ttProbes;
+                            stats_.ttHits        += r.stats.ttHits;
+                            stats_.ttCutoffs     += r.stats.ttCutoffs;
+                            stats_.generatedMoves += r.stats.generatedMoves;
+                            stats_.expandedMoves += r.stats.expandedMoves;
                             if (r.score > bestAtDepth.score) {
                                 bestAtDepth.score = r.score;
                                 bestAtDepth.move  = r.mv;
@@ -1271,6 +1583,7 @@ public:
         auto endTime = std::chrono::steady_clock::now();
         stats_.timeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                             endTime - startTime_).count();
+        stats_.elapsedMs = static_cast<double>(stats_.timeMs);
         historyTable_ = nullptr;
         return bestMove;
     }
@@ -1301,8 +1614,10 @@ public:
     void setTimeLimitMs(int ms) { timeLimitMs_ = ms; }
     void setMoveGenMode(MoveGenMode m) { moveGenMode_ = m; }
     void setUseLMR(bool v) { useLMR_ = v; }
+    void setEnableLMRLines(bool v) { enableLMRLines_ = v; }
     void setUseExtensions(bool v) { useExtensions_ = v; }
     void setPerfectClassic3(bool v) { perfectClassic3_ = v; }
+    void setBanCenterFirstMove(bool v) { banCenterFirstMove_ = v; }
     void setAllowOpeningShortcut(bool v) { allowOpeningShortcut_ = v; }
 };
 
@@ -1328,6 +1643,10 @@ public:
     void setPerfectClassic3(bool v) { perfectClassic3_ = v; }
     int timeLimitMs() const { return timeLimitMs_; }
     void setTimeLimitMs(int ms) { timeLimitMs_ = ms; }
+    bool enableLMRLines() const { return enableLMRLines_; }
+    void setEnableLMRLines(bool v) { enableLMRLines_ = v; }
+    bool banCenterFirstMove() const { return banCenterFirstMove_; }
+    void setBanCenterFirstMove(bool v) { banCenterFirstMove_ = v; }
 
 private:
     int maxDepth_;
@@ -1337,6 +1656,8 @@ private:
     bool useExtensions_ = true;
     bool perfectClassic3_ = false;
     int timeLimitMs_ = -1;
+    bool enableLMRLines_ = false;
+    bool banCenterFirstMove_ = false;
 };
 
 class AnalysisResult {
@@ -1356,6 +1677,8 @@ inline AnalysisResult analysePosition(const Board& b, Player toMove, GameMode mo
     ai.setUseExtensions(params.useExtensions());
     ai.setPerfectClassic3(params.perfectClassic3());
     ai.setTimeLimitMs(params.timeLimitMs());
+    ai.setEnableLMRLines(params.enableLMRLines());
+    ai.setBanCenterFirstMove(params.banCenterFirstMove());
     ai.initZobrist(boardCopy.getRows(), boardCopy.getCols());
     uint64_t baseHash = ai.computeZobrist(boardCopy, toMove);
     ai.initEvalCache(boardCopy);
@@ -1366,7 +1689,7 @@ inline AnalysisResult analysePosition(const Board& b, Player toMove, GameMode mo
     result.bestScore = std::numeric_limits<int>::min();
     result.topMoves.clear();
 
-    DynamicArray<Coord> moves = ai.getSearchMoves(boardCopy, params.maxDepth());
+    DynamicArray<Coord> moves = ai.getSearchMoves(boardCopy, params.maxDepth(), toMove);
     int rows = boardCopy.getRows();
     int cols = boardCopy.getCols();
     bool emptyBoard = true;
@@ -1379,7 +1702,7 @@ inline AnalysisResult analysePosition(const Board& b, Player toMove, GameMode mo
         }
     }
     bool hasCenter = (rows % 2 == 1) && (cols % 2 == 1);
-    if (mode == GameMode::LinesScore && toMove == Player::X && emptyBoard && hasCenter) {
+    if (params.banCenterFirstMove() && toMove == Player::X && emptyBoard && hasCenter) {
         int cr = rows / 2;
         int cc = cols / 2;
         DynamicArray<Coord> filtered;
@@ -1452,6 +1775,7 @@ inline AnalysisResult analysePosition(const Board& b, Player toMove, GameMode mo
     auto endTime = std::chrono::high_resolution_clock::now();
     ai.stats_.timeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                            endTime - startTime).count();
+    ai.stats_.elapsedMs = static_cast<double>(ai.stats_.timeMs);
     bool cancelled = ai.isCancelled();
     ai.stats_.completedDepth = cancelled ? 0 : params.maxDepth();
 
