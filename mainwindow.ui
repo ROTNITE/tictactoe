@@ -63,13 +63,17 @@
          <item row="0" column="1">
          <widget class="QComboBox" name="comboMode"/>
          </item>
-         <item row="1" column="0" colspan="2">
-          <widget class="QCheckBox" name="checkSwapRule">
+         <item row="1" column="0">
+          <widget class="QLabel" name="labelOpeningRule">
            <property name="text">
-            <string>Правило обмена (Swap rule)</string>
+             <string>Правило:</string>
            </property>
+          </widget>
+         </item>
+         <item row="1" column="1">
+          <widget class="QComboBox" name="comboOpeningRule">
            <property name="toolTip">
-            <string>В режиме по линиям второй ходящий может забрать первый ход, поменяв стороны.</string>
+            <string>Выберите правило открытия для балансировки.</string>
            </property>
           </widget>
          </item>
@@ -152,7 +156,7 @@
          <item row="0" column="0">
           <widget class="QLabel" name="labelCurrent">
            <property name="text">
-            <string>Ходит:</string>
+             <string>Сейчас:</string>
            </property>
           </widget>
          </item>
@@ -212,7 +216,7 @@
          <item row="4" column="0">
           <widget class="QLabel" name="labelAiMoveTitle">
            <property name="text">
-            <string>Ход ИИ:</string>
+             <string>Ход:</string>
            </property>
           </widget>
          </item>
@@ -331,91 +335,44 @@
            <set>Qt::AlignRight|Qt::AlignVCenter</set>
           </property>
           <item row="0" column="0">
+           <widget class="QLabel" name="labelEnginePreset">
+            <property name="text">
+             <string>Пресет движка:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QComboBox" name="comboEnginePreset"/>
+          </item>
+          <item row="1" column="0">
             <widget class="QLabel" name="labelDepth">
              <property name="text">
               <string>Глубина:</string>
              </property>
             </widget>
            </item>
-          <item row="0" column="1">
+          <item row="1" column="1">
             <widget class="QSpinBox" name="spinDepth"/>
           </item>
-          <item row="1" column="0" colspan="2">
+          <item row="2" column="0" colspan="2">
             <widget class="QCheckBox" name="checkDynamicDepth">
              <property name="text">
-              <string>Динамический поиск (по времени)</string>
-             </property>
-             <property name="toolTip">
-              <string>Итеративное углубление с ограничением по времени на ход.</string>
-             </property>
-            </widget>
-          </item>
-          <item row="2" column="0">
-            <widget class="QLabel" name="labelTimeLimit">
-             <property name="text">
-              <string>Лимит, сек:</string>
-             </property>
-            </widget>
-          </item>
-          <item row="2" column="1">
-           <widget class="QSpinBox" name="spinTimeLimit">
-            <property name="minimum">
-             <number>1</number>
-            </property>
-            <property name="maximum">
-             <number>20</number>
-            </property>
-            <property name="value">
-             <number>10</number>
-            </property>
-           </widget>
-          </item>
-          <item row="3" column="0" colspan="2">
-            <widget class="QCheckBox" name="checkMemo">
-             <property name="text">
-               <string>Мемоизация (кеш)</string>
-              </property>
-              <property name="checked">
-               <bool>true</bool>
-              </property>
-             </widget>
-          </item>
-          <item row="4" column="0" colspan="2">
-            <widget class="QCheckBox" name="checkAutoAi">
-             <property name="text">
-              <string>Автоход ИИ</string>
-             </property>
-             <property name="checked">
-              <bool>true</bool>
-             </property>
-            </widget>
-          </item>
-          <item row="5" column="0" colspan="2">
-            <widget class="QCheckBox" name="checkEvalHuman">
-             <property name="text">
-              <string>Оценивать ходы игрока</string>
+              <string>Динамическая глубина (по времени)</string>
              </property>
              <property name="checked">
               <bool>false</bool>
              </property>
             </widget>
           </item>
-          <item row="6" column="0" colspan="2">
-            <widget class="QCheckBox" name="checkHintDynamic">
+          <item row="3" column="0">
+            <widget class="QLabel" name="labelTimeLimit">
              <property name="text">
-              <string>Динамическая подсказка</string>
+              <string>Лимит времени (сек):</string>
              </property>
             </widget>
           </item>
-          <item row="7" column="0">
-            <widget class="QLabel" name="labelHintTime">
-             <property name="text">
-              <string>Лимит подсказки, сек:</string>
-             </property>
-            </widget>
-          </item>
-          <item row="7" column="1">
-            <widget class="QSpinBox" name="spinHintTime">
+          <item row="3" column="1">
+            <widget class="QSpinBox" name="spinTimeLimit">
              <property name="minimum">
               <number>1</number>
              </property>
@@ -426,6 +383,84 @@
               <number>10</number>
              </property>
             </widget>
+          </item>
+          <item row="4" column="0" colspan="2">
+            <widget class="QCheckBox" name="checkMemo">
+             <property name="text">
+               <string>Мемоизация (кеш)</string>
+              </property>
+              <property name="checked">
+               <bool>true</bool>
+              </property>
+             </widget>
+          </item>
+          <item row="5" column="0" colspan="2">
+            <widget class="QCheckBox" name="checkAutoAi">
+             <property name="text">
+              <string>Автоход ИИ</string>
+             </property>
+             <property name="checked">
+              <bool>true</bool>
+             </property>
+            </widget>
+          </item>
+          <item row="9" column="0" colspan="2">
+           <widget class="QGroupBox" name="groupBoxAdvanced">
+            <property name="title">
+             <string>Расширенные настройки</string>
+            </property>
+            <property name="checkable">
+             <bool>true</bool>
+            </property>
+            <property name="checked">
+             <bool>false</bool>
+            </property>
+            <layout class="QFormLayout" name="formLayoutAdvanced">
+             <property name="labelAlignment">
+              <set>Qt::AlignRight|Qt::AlignVCenter</set>
+             </property>
+             <item row="0" column="0">
+              <widget class="QLabel" name="labelMoveGenMode">
+               <property name="text">
+                <string>Генерация ходов:</string>
+               </property>
+              </widget>
+             </item>
+             <item row="0" column="1">
+              <widget class="QComboBox" name="comboMoveGenMode">
+               <item>
+                <property name="text">
+                 <string>Full</string>
+                </property>
+               </item>
+               <item>
+                <property name="text">
+                 <string>Frontier</string>
+                </property>
+               </item>
+               <item>
+                <property name="text">
+                 <string>Hybrid</string>
+                </property>
+               </item>
+              </widget>
+             </item>
+             <item row="1" column="0" colspan="2">
+              <widget class="QCheckBox" name="checkUseLmr">
+               <property name="text">
+                <string>LMR (сокращение глубины)</string>
+               </property>
+              </widget>
+             </item>
+             <item row="2" column="0" colspan="2">
+              <widget class="QCheckBox" name="checkUseExtensions">
+               <property name="text">
+                <string>Extensions (углубление тактических ходов)</string>
+               </property>
+              </widget>
+             </item>
+            </layout>
+           </widget>
           </item>
          </layout>
         </widget>

@@ -106,6 +106,9 @@ public:
         return data_[index];
     }
 
+    T& unchecked(size_t index) { return data_[index]; }
+    const T& unchecked(size_t index) const { return data_[index]; }
+
     size_t size() const { return size_; }
     size_t capacity() const { return capacity_; }
     bool empty() const { return size_ == 0; }

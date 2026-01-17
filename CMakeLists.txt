@@ -37,3 +37,15 @@ set(TS_FILES tictactoe2_ru_RU.ts)
 qt_create_translation(QM_FILES ${CMAKE_SOURCE_DIR} ${TS_FILES})
 
 qt_finalize_executable(tictactoe2)
+
+enable_testing()
+
+add_executable(opening_tests
+    opening_tests.cpp
+)
+set_target_properties(opening_tests PROPERTIES
+    AUTOMOC OFF
+    AUTOUIC OFF
+    AUTORCC OFF
+)
+add_test(NAME opening_tests COMMAND opening_tests)

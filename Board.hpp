@@ -2,8 +2,8 @@
 #include "DynamicArray.hpp"
 #include <iostream>
 #include <algorithm>
-#include <string>
 #include <stdexcept>
+#include <limits>
 
 enum class CellState : char {
     Empty = ' ',
@@ -46,6 +46,7 @@ private:
     int rows_;
     int cols_;
     int winLength_;
+    int emptyCount_ = 0;
 
 public:
     Board(int size = 3, int winLength = 3)
@@ -66,12 +67,12 @@ public:
         for (int i = 0; i < rows_ * cols_; ++i) {
             cells_.push_back(CellState::Empty);
         }
+        emptyCount_ = rows_ * cols_;
     }
 
     
     int getRows() const { return rows_; }
     int getCols() const { return cols_; }
-    int getSize() const { return rows_; }
     int getWinLength() const { return winLength_; }
 
     
@@ -87,14 +88,24 @@ public:
     }
 
     CellState getNoCheck(int row, int col) const {
-        return cells_[row * cols_ + col];
+        return cells_.unchecked(static_cast<size_t>(row * cols_ + col));
     }
 
     void set(int row, int col, CellState state) {
         if (row < 0 || row >= rows_ || col < 0 || col >= cols_) {
             throw std::out_of_range("Invalid coordinates");
         }
-        cells_[row * cols_ + col] = state;
+        int idx = row * cols_ + col;
+        CellState prev = cells_.unchecked(static_cast<size_t>(idx));
+        if (prev == state) {
+            return;
+        }
+        if (prev == CellState::Empty && state != CellState::Empty) {
+            --emptyCount_;
+        } else if (prev != CellState::Empty && state == CellState::Empty) {
+            ++emptyCount_;
+        }
+        cells_.unchecked(static_cast<size_t>(idx)) = state;
     }
 
     void set(const Coord& coord, CellState state) {
@@ -110,19 +121,14 @@ public:
     }
 
     bool isFull() const {
-        for (int i = 0; i < rows_ * cols_; ++i) {
-            if (cells_[i] == CellState::Empty) {
-                return false;
-            }
-        }
-        return true;
+        return emptyCount_ == 0;
     }
 
     DynamicArray<Coord> getEmptyCells() const {
         DynamicArray<Coord> result;
         for (int row = 0; row < rows_; ++row) {
             for (int col = 0; col < cols_; ++col) {
-                if (isEmpty(row, col)) {
+                if (cells_.unchecked(static_cast<size_t>(row * cols_ + col)) == CellState::Empty) {
                     result.push_back(Coord(row, col));
                 }
             }
@@ -131,46 +137,40 @@ public:
     }
 
     DynamicArray<Coord> getCandidateMoves(int radius = 1) const {
-        DynamicArray<Coord> result;
-
-        int minRow = rows_;
-        int maxRow = -1;
-        int minCol = cols_;
-        int maxCol = -1;
-
-        for (int row = 0; row < rows_; ++row) {
-            for (int col = 0; col < cols_; ++col) {
-                if (!isEmpty(row, col)) {
-                    if (row < minRow) minRow = row;
-                    if (row > maxRow) maxRow = row;
-                    if (col < minCol) minCol = col;
-                    if (col > maxCol) maxCol = col;
-                }
-            }
-        }
-
-        if (maxRow == -1) {
-            return getEmptyCells();
-        }
-
         DynamicArray<Coord> frontier;
         frontier.reserve(rows_ * cols_);
-        DynamicArray<char> mark;
-        mark.reserve(rows_ * cols_);
-        for (int i = 0; i < rows_ * cols_; ++i) mark.push_back(0);
+        static thread_local DynamicArray<int> mark;
+        static thread_local int markStamp = 1;
+        int total = rows_ * cols_;
+        if (mark.size() != static_cast<size_t>(total)) {
+            mark.clear();
+            mark.reserve(static_cast<size_t>(total));
+            for (int i = 0; i < total; ++i) mark.push_back(0);
+            markStamp = 1;
+        } else if (markStamp == std::numeric_limits<int>::max()) {
+            markStamp = 1;
+            for (size_t i = 0; i < mark.size(); ++i) {
+                mark.unchecked(i) = 0;
+            }
+        } else {
+            ++markStamp;
+        }
+        bool anyStone = false;
         for (int row = 0; row < rows_; ++row) {
             for (int col = 0; col < cols_; ++col) {
-                if (isEmpty(row, col)) continue;
+                if (cells_.unchecked(static_cast<size_t>(row * cols_ + col)) == CellState::Empty) continue;
+                anyStone = true;
                 for (int dr = -radius; dr <= radius; ++dr) {
                     for (int dc = -radius; dc <= radius; ++dc) {
                         if (dr == 0 && dc == 0) continue;
                         int rr = row + dr;
                         int cc = col + dc;
                         if (rr < 0 || rr >= rows_ || cc < 0 || cc >= cols_) continue;
-                        if (!isEmpty(rr, cc)) continue;
+                        if (cells_.unchecked(static_cast<size_t>(rr * cols_ + cc)) != CellState::Empty) continue;
                         int idx = rr * cols_ + cc;
-                        if (idx >= 0 && idx < mark.size() && mark[idx] == 0) {
-                            mark[idx] = 1;
+                        size_t sidx = static_cast<size_t>(idx);
+                        if (mark.unchecked(sidx) != markStamp) {
+                            mark.unchecked(sidx) = markStamp;
                             frontier.push_back(Coord(rr, cc));
                         }
                     }
@@ -178,6 +178,9 @@ public:
             }
         }
 
+        if (!anyStone) {
+            return getEmptyCells();
+        }
         if (frontier.size() == 0) {
             return getEmptyCells();
         }
@@ -193,7 +196,7 @@ public:
             for (int col = 0; col <= cols_ - winLength_; ++col) {
                 bool win = true;
                 for (int k = 0; k < winLength_; ++k) {
-                    if (get(row, col + k) != player) {
+                    if (getNoCheck(row, col + k) != player) {
                         win = false;
                         break;
                     }
@@ -207,7 +210,7 @@ public:
             for (int row = 0; row <= rows_ - winLength_; ++row) {
                 bool win = true;
                 for (int k = 0; k < winLength_; ++k) {
-                    if (get(row + k, col) != player) {
+                    if (getNoCheck(row + k, col) != player) {
                         win = false;
                         break;
                     }
@@ -221,7 +224,7 @@ public:
             for (int col = 0; col <= cols_ - winLength_; ++col) {
                 bool win = true;
                 for (int k = 0; k < winLength_; ++k) {
-                    if (get(row + k, col + k) != player) {
+                    if (getNoCheck(row + k, col + k) != player) {
                         win = false;
                         break;
                     }
@@ -235,7 +238,7 @@ public:
             for (int col = winLength_ - 1; col < cols_; ++col) {
                 bool win = true;
                 for (int k = 0; k < winLength_; ++k) {
-                    if (get(row + k, col - k) != player) {
+                    if (getNoCheck(row + k, col - k) != player) {
                         win = false;
                         break;
                     }
@@ -305,95 +308,6 @@ public:
         return total;
     }
 
-    int countLinesFor(CellState who) const {
-        if (who == CellState::Empty) return 0;
-
-        int count = 0;
-
-        
-        for (int row = 0; row < rows_; ++row) {
-            bool full = true;
-            for (int col = 0; col < cols_; ++col) {
-                if (get(row, col) != who) {
-                    full = false;
-                    break;
-                }
-            }
-            if (full) ++count;
-        }
-
-        
-        for (int col = 0; col < cols_; ++col) {
-            bool full = true;
-            for (int row = 0; row < rows_; ++row) {
-                if (get(row, col) != who) {
-                    full = false;
-                    break;
-                }
-            }
-            if (full) ++count;
-        }
-
-        
-        {
-            int diagLen = std::min(rows_, cols_);
-            bool full = true;
-            for (int i = 0; i < diagLen; ++i) {
-                if (get(i, i) != who) {
-                    full = false;
-                    break;
-                }
-            }
-            if (full) ++count;
-        }
-
-        
-        {
-            int diagLen = std::min(rows_, cols_);
-            bool full = true;
-            for (int i = 0; i < diagLen; ++i) {
-                int r = i;
-                int c = (cols_ - 1) - i;
-                if (r < 0 || r >= rows_ || c < 0 || c >= cols_
-                    || get(r, c) != who)
-                {
-                    full = false;
-                    break;
-                }
-            }
-            if (full) ++count;
-        }
-
-        return count;
-    }
-
-    
-    int computeScore() const {
-        int linesX = countLinesFor(CellState::X);
-        int linesO = countLinesFor(CellState::O);
-        return linesO - linesX;
-    }
-
-    
-    size_t hash() const {
-        size_t h = 0;
-        int total = rows_ * cols_;
-        for (int i = 0; i < total; ++i) {
-            h = h * 3 + static_cast<int>(cells_[i]);
-        }
-        return h;
-    }
-
-    bool operator==(const Board& other) const {
-        if (rows_ != other.rows_ || cols_ != other.cols_ || winLength_ != other.winLength_) {
-            return false;
-        }
-        int total = rows_ * cols_;
-        for (int i = 0; i < total; ++i) {
-            if (cells_[i] != other.cells_[i]) return false;
-        }
-        return true;
-    }
 
     void print() const {
         std::cout << "  ";
@@ -421,13 +335,3 @@ public:
         }
     }
 };
-
-namespace std {
-template<>
-class hash<Board> {
-public:
-    size_t operator()(const Board& board) const {
-        return board.hash();
-    }
-};
-}

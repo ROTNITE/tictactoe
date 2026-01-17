@@ -11,9 +11,28 @@
 #include <QFormLayout>
 #include <QDialogButtonBox>
 #include <QVBoxLayout>
+#include <QGroupBox>
+#include <QAbstractButton>
+#include <algorithm>
 #include <limits>
 #include <QtConcurrent/QtConcurrent>
 #include <QSignalBlocker>
+
+namespace {
+bool isOpeningChoicePhase(OpeningPhase phase)
+{
+    switch (phase) {
+    case OpeningPhase::Pie_OfferSwap:
+    case OpeningPhase::Swap2_B_ChooseOption:
+    case OpeningPhase::Swap2_A_FinalChooseSide:
+    case OpeningPhase::Swap2P_B_ChooseSide:
+    case OpeningPhase::Swap2P_A_FinalChooseSide:
+        return true;
+    default:
+        return false;
+    }
+}
+}
 
 
 MainWindow::MainWindow(QWidget *parent)
@@ -25,11 +44,26 @@ MainWindow::MainWindow(QWidget *parent)
 
     applyModernStyle();
 
+    if (ui->statusbar) {
+        turnIndicatorLabel_ = new QLabel(this);
+        turnIndicatorLabel_->setObjectName("labelTurnIndicator");
+        turnIndicatorLabel_->setText(QStringLiteral("«—»"));
+        turnIndicatorLabel_->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+        turnIndicatorLabel_->setStyleSheet("color: #ffedd5; font-weight: 800;");
+        ui->statusbar->addPermanentWidget(turnIndicatorLabel_);
+    }
+
     
     ui->comboMode->clear();
     ui->comboMode->addItem("По линиям");    
     ui->comboMode->addItem("Классический"); 
     ui->comboMode->setCurrentIndex(0);
+    ui->comboOpeningRule->clear();
+    ui->comboOpeningRule->addItem("Без открытия");
+    ui->comboOpeningRule->addItem("Pie-swap");
+    ui->comboOpeningRule->addItem("Swap2");
+    ui->comboOpeningRule->addItem("Swap2+");
+    ui->comboOpeningRule->setCurrentIndex(0);
 
     
     ui->comboGameType->clear();
@@ -68,11 +102,16 @@ MainWindow::MainWindow(QWidget *parent)
     ui->spinTimeLimit->setMinimum(1);
     ui->spinTimeLimit->setMaximum(20);
     ui->spinTimeLimit->setValue(10);
+    ui->spinTimeLimit->setEnabled(ui->checkDynamicDepth->isChecked());
     ui->checkMemo->setChecked(true);
-    ui->checkHintDynamic->setChecked(false);
-    ui->spinHintTime->setMinimum(1);
-    ui->spinHintTime->setMaximum(20);
-    ui->spinHintTime->setValue(10);
+    ui->comboEnginePreset->clear();
+    ui->comboEnginePreset->addItem("Fast");
+    ui->comboEnginePreset->addItem("Strict");
+    ui->comboEnginePreset->setCurrentIndex(0);
+    ui->comboMoveGenMode->setCurrentIndex(2);
+    ui->checkUseLmr->setChecked(true);
+    ui->checkUseExtensions->setChecked(true);
+    ui->groupBoxAdvanced->setChecked(false);
 
     
     ui->checkAutoAi->setChecked(true);
@@ -91,12 +130,14 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->comboAIVsAISpeed, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onAivAiSpeedChanged);
     connect(ui->comboPlayerSide, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onGameTypeChanged);
     connect(ui->spinTimeLimit, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::onTimeLimitChanged);
-    connect(ui->checkHintDynamic, &QCheckBox::checkStateChanged, this, &MainWindow::onHintDynamicToggled);
-    connect(ui->spinHintTime, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::onHintTimeChanged);
     connect(ui->checkAutoAi, &QCheckBox::checkStateChanged, this, &MainWindow::onAutoAiToggled);
-    connect(ui->checkEvalHuman, &QCheckBox::checkStateChanged, this, &MainWindow::onEvalHumanToggled);
     connect(ui->checkDynamicDepth, &QCheckBox::checkStateChanged, this, &MainWindow::onDynamicDepthToggled);
-    connect(ui->checkSwapRule, &QCheckBox::checkStateChanged, this, &MainWindow::onSwapRuleToggled);
+    connect(ui->comboOpeningRule, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onOpeningRuleChanged);
+    connect(ui->comboEnginePreset, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onEnginePresetChanged);
+    connect(ui->groupBoxAdvanced, &QGroupBox::toggled, this, &MainWindow::onAdvancedToggled);
+    connect(ui->comboMoveGenMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onMoveGenModeChanged);
+    connect(ui->checkUseLmr, &QCheckBox::checkStateChanged, this, &MainWindow::onUseLmrToggled);
+    connect(ui->checkUseExtensions, &QCheckBox::checkStateChanged, this, &MainWindow::onUseExtensionsToggled);
     connect(&aiWatcher_, &QFutureWatcher<AiSearchResult>::finished, this, &MainWindow::onAiSearchFinished);
     connect(&hintWatcher_, &QFutureWatcher<AiSearchResult>::finished, this, &MainWindow::onHintFinished);
     connect(&aiVsAiWatcher_, &QFutureWatcher<AIVsAIResult>::finished, this, &MainWindow::onAiVsAiFinished);
@@ -115,16 +156,15 @@ MainWindow::MainWindow(QWidget *parent)
     currentGameType_    = GameType::HumanVsAI;
     currentAIVsAISpeed_ = AIVsAISpeed::Automatic;
     autoAiEnabled_      = true;
-    humanIsX_           = (ui->comboPlayerSide->currentIndex() == 0);
-    evaluateHumanMoves_ = ui->checkEvalHuman->isChecked();
+    humanSeat_          = (ui->comboPlayerSide->currentIndex() == 0) ? Seat::A : Seat::B;
+    syncHumanSideFromSeat();
     dynamicDepthMode_   = ui->checkDynamicDepth->isChecked();
-    dynamicHintMode_    = ui->checkHintDynamic->isChecked();
     timeLimitMs_        = ui->spinTimeLimit->value() * 1000;
-    hintTimeLimitMs_    = ui->spinHintTime->value() * 1000;
-    swapRuleEnabled_    = ui->checkSwapRule->isChecked();
-    swapPromptShown_    = false;
+    openingRule_        = openingRuleFromUi();
+    controller_.setOpeningRule(openingRule_);
     hintInProgress_     = false;
     hintCanceled_       = false;
+    applyEnginePresetFromUi();
 
     
     rebuildBoard();
@@ -141,7 +181,7 @@ MainWindow::MainWindow(QWidget *parent)
     ui->btnCancelAi->setEnabled(false);
     updateGameTypeUiState();
     setSettingsEnabled(true);
-    updateSwapUiState();
+    updateOpeningUiState();
 }
 
 MainWindow::~MainWindow()
@@ -232,6 +272,21 @@ void MainWindow::applyModernStyle()
             font-weight: 600;
         }
 
+        QGroupBox::indicator {
+            width: 16px;
+            height: 16px;
+        }
+        QGroupBox::indicator:unchecked {
+            border: 1px solid #334155;
+            background-color: #020617;
+            border-radius: 4px;
+        }
+        QGroupBox::indicator:checked {
+            border: 1px solid #22c55e;
+            background-color: #22c55e;
+            border-radius: 4px;
+        }
+
         QLabel {
             color: #e5e7eb;
         }
@@ -319,6 +374,21 @@ void MainWindow::applyModernStyle()
             border-radius: 4px;
         }
         QCheckBox::indicator:checked {
+            border: 1px solid #22c55e;
+            background-color: #22c55e;
+            border-radius: 4px;
+        }
+
+        QGroupBox::indicator {
+            width: 16px;
+            height: 16px;
+        }
+        QGroupBox::indicator:unchecked {
+            border: 1px solid #334155;
+            background-color: #020617;
+            border-radius: 4px;
+        }
+        QGroupBox::indicator:checked {
             border: 1px solid #22c55e;
             background-color: #22c55e;
             border-radius: 4px;
@@ -554,7 +624,7 @@ void MainWindow::rebuildBoard()
 
 void MainWindow::refreshBoardView()
 {
-    const Board& b = controller_.board();
+    Board b = controller_.boardSnapshot();
     int rows = b.getRows();
     int cols = b.getCols();
 
@@ -610,7 +680,7 @@ QSet<QPoint> MainWindow::findWinningCells(CellState player) const
         return result;
     }
 
-    const Board& b = controller_.board();
+    Board b = controller_.boardSnapshot();
     int rows   = b.getRows();
     int cols   = b.getCols();
     int winLen = b.getWinLength();
@@ -665,14 +735,12 @@ void MainWindow::setSettingsEnabled(bool enabled)
     ui->spinBoardCols->setEnabled(enabled);
     ui->spinWinLength->setEnabled(enabled);
     ui->spinDepth->setEnabled(enabled);
-    ui->checkMemo->setEnabled(enabled);
-    ui->checkEvalHuman->setEnabled(enabled);
     ui->checkDynamicDepth->setEnabled(enabled);
-    
-    ui->spinTimeLimit->setEnabled(ui->checkDynamicDepth->isChecked());
-    ui->checkHintDynamic->setEnabled(enabled);
-    ui->spinHintTime->setEnabled(ui->checkHintDynamic->isChecked());
-    ui->checkSwapRule->setEnabled(enabled && controller_.mode() == GameMode::LinesScore);
+    ui->checkMemo->setEnabled(enabled);
+    ui->comboEnginePreset->setEnabled(enabled);
+    ui->groupBoxAdvanced->setEnabled(enabled);
+    ui->comboOpeningRule->setEnabled(enabled);
+    ui->spinTimeLimit->setEnabled(enabled && ui->checkDynamicDepth->isChecked());
     
     ui->checkAutoAi->setEnabled(currentGameType_ == GameType::HumanVsAI);
     ui->comboGameType->setEnabled(enabled);
@@ -683,7 +751,7 @@ void MainWindow::setSettingsEnabled(bool enabled)
     }
     ui->comboPlayerSide->setEnabled(enabled && currentGameType_ == GameType::HumanVsAI);
     updateGameTypeUiState();
-    updateSwapUiState();
+    updateOpeningUiState();
 }
 
 MainWindow::GameType MainWindow::gameTypeFromUI() const
@@ -703,11 +771,25 @@ MainWindow::AIVsAISpeed MainWindow::aiVsAiSpeedFromUI() const
 
 bool MainWindow::isPlayerAi(Player p) const
 {
+    return isSeatAi(controller_.seatForSide(p));
+}
+
+bool MainWindow::isSeatAi(Seat seat) const
+{
     if (currentGameType_ == GameType::HumanVsHuman) return false;
-    if (currentGameType_ == GameType::HumanVsAI) {
-        return humanIsX_ ? (p == Player::O) : (p == Player::X);
-    }
-    return true; 
+    if (currentGameType_ == GameType::HumanVsAI) return seat != humanSeat_;
+    return true;
+}
+
+bool MainWindow::isCurrentSeatAi() const
+{
+    return isSeatAi(controller_.seatToMove());
+}
+
+void MainWindow::syncHumanSideFromSeat()
+{
+    Seat seatX = controller_.seatForSide(Player::X);
+    humanIsX_ = (seatX == humanSeat_);
 }
 
 void MainWindow::updateGameTypeUiState()
@@ -737,74 +819,184 @@ void MainWindow::updateGameTypeUiState()
     ui->btnNewGame->setEnabled(!busy);
     
     ui->btnEndGame->setEnabled(!controller_.isGameOver() || busy);
-    ui->spinTimeLimit->setEnabled(ui->checkDynamicDepth->isChecked());
-    bool hintDynamicAllowed = !aiVsAi;
-    if (aiVsAi && ui->checkHintDynamic->isChecked()) {
-        ui->checkHintDynamic->setChecked(false);
-        dynamicHintMode_ = false;
-    }
-    ui->checkHintDynamic->setEnabled(unlocked && hintDynamicAllowed);
-    ui->spinHintTime->setEnabled(hintDynamicAllowed && ui->checkHintDynamic->isChecked());
-    updateSwapUiState();
+    ui->checkDynamicDepth->setEnabled(unlocked);
+    ui->spinTimeLimit->setEnabled(unlocked && ui->checkDynamicDepth->isChecked());
+    updateOpeningUiState();
 }
 
-void MainWindow::updateSwapUiState()
+void MainWindow::updateOpeningUiState()
 {
-    bool ruleActive = controller_.isSwapRuleEnabled();
-    bool available = ruleActive && controller_.isSwapAvailable();
+    if (!hintLine_.isEmpty() || currentGameType_ == GameType::AIVsAI) return;
 
-    
-    if (available && hintLine_.isEmpty() && currentGameType_ != GameType::AIVsAI) {
-        setBigInfo("Правило обмена: второй игрок может забрать первый ход.");
-    }
-}
-
-bool MainWindow::applySwapIfPossible(const QString& initiator, bool silent, bool alreadyApplied)
-{
-    if (controller_.mode() != GameMode::LinesScore) {
-        return false;
-    }
-    if (!alreadyApplied && (!controller_.isSwapRuleEnabled() || !controller_.isSwapAvailable())) {
-        return false;
-    }
-    if (!alreadyApplied) {
-        if (!controller_.applySwapRule()) {
-            return false;
+    switch (controller_.openingPhase()) {
+    case OpeningPhase::Pie_OfferSwap:
+        setBigInfo("Открытие Pie-swap: второй игрок может поменяться сторонами.");
+        break;
+    case OpeningPhase::Swap2_B_ChooseOption:
+        setBigInfo("Открытие Swap2: выберите опцию (взять X, взять O, или поставить две и дать выбор).");
+        break;
+    case OpeningPhase::Swap2_A_FinalChooseSide:
+        setBigInfo("Открытие Swap2: игрок A выбирает сторону.");
+        break;
+    case OpeningPhase::Swap2P_B_ChooseSide:
+        setBigInfo("Открытие Swap2+: игрок B выбирает сторону.");
+        break;
+    case OpeningPhase::Swap2P_A_FinalChooseSide:
+        setBigInfo("Открытие Swap2+: игрок A выбирает сторону.");
+        break;
+    default:
+        if (hintLine_.startsWith("Открытие")) {
+            hintLine_.clear();
+            refreshBigInfoDisplay();
         }
+        break;
     }
-    swapPromptShown_ = true;
+}
 
-    if (currentGameType_ == GameType::HumanVsAI) {
-        humanIsX_ = !humanIsX_;
-        QSignalBlocker blocker(ui->comboPlayerSide);
-        ui->comboPlayerSide->setCurrentIndex(humanIsX_ ? 0 : 1);
+OpeningRule MainWindow::openingRuleFromUi() const
+{
+    int idx = ui->comboOpeningRule->currentIndex();
+    if (idx == 1) return OpeningRule::PieSwap;
+    if (idx == 2) return OpeningRule::Swap2;
+    if (idx == 3) return OpeningRule::Swap2Plus;
+    return OpeningRule::None;
+}
+
+void MainWindow::onOpeningRuleChanged(int index)
+{
+    Q_UNUSED(index);
+    openingRule_ = openingRuleFromUi();
+    controller_.setOpeningRule(openingRule_);
+    updateOpeningUiState();
+}
+
+void MainWindow::showOpeningRuleInfoDialog()
+{
+    QString text;
+    switch (openingRule_) {
+    case OpeningRule::None:
+        text = QStringLiteral("Правило: без открытия.\nСтороны фиксированы, игра начинается обычными ходами.");
+        break;
+    case OpeningRule::PieSwap:
+        text = QStringLiteral(
+            "Правило: Pie-swap.\nПервый ход делает X. После этого второй игрок может поменяться сторонами.");
+        break;
+    case OpeningRule::Swap2:
+        text = QStringLiteral(
+            "Правило: Swap2.\nX ставит 1-й и 3-й камень, O ставит 2-й. Затем игрок B выбирает опцию: "
+            "взять X, взять O + доп. O, или поставить два камня и дать выбор стороны игроку A.");
+        break;
+    case OpeningRule::Swap2Plus:
+        text = QStringLiteral(
+            "Правило: Swap2+.\nИгрок A ставит X и O, затем игрок B выбирает сторону и ставит 3-й камень "
+            "за выбранную сторону. После этого игрок A выбирает сторону.");
+        break;
     }
 
-    if (!silent) {
-        QString msg;
-        if (currentGameType_ == GameType::HumanVsAI) {
-            msg = QString("%1 применил правило обмена. Вы теперь играете за %2, ИИ за %3.")
-                      .arg(initiator)
-                      .arg(humanIsX_ ? "X" : "O")
-                      .arg(humanIsX_ ? "O" : "X");
-        } else if (currentGameType_ == GameType::HumanVsHuman) {
-            msg = QString("%1 применил правило обмена. Игроки поменялись сторонами.")
-                      .arg(initiator);
+    QMessageBox::information(this, QStringLiteral("Правило игры"), text);
+}
+
+bool MainWindow::resolveOpeningChoiceIfNeeded()
+{
+    if (!isOpeningChoicePhase(controller_.openingPhase())) return false;
+    if (currentGameType_ == GameType::AIVsAI) return false;
+
+    if (isCurrentSeatAi()) {
+        int depth = ui->spinDepth->value();
+        if (dynamicDepthMode_) {
+            depth = std::max(depth, 12);
+        }
+        bool memo = ui->checkMemo->isChecked();
+        bool resolved = controller_.autoResolveOpeningChoiceForCurrentAI(depth, memo, &aiCancelFlag_);
+        if (resolved) {
+            syncHumanSideFromSeat();
+            setBigInfo("ИИ сделал выбор открытия.");
+        }
+        return resolved;
+    }
+
+    OpeningPhase phase = controller_.openingPhase();
+    if (phase == OpeningPhase::Pie_OfferSwap) {
+        QMessageBox::StandardButton res = QMessageBox::question(
+            this,
+            QStringLiteral("Открытие Pie-swap"),
+            QStringLiteral("Поменяться сторонами?"),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::No);
+        controller_.choosePieSwap(res == QMessageBox::Yes);
+        syncHumanSideFromSeat();
+        if (res == QMessageBox::Yes) {
+            setBigInfo("Вы поменялись сторонами.");
         } else {
-            msg = QString("%1 применил правило обмена.").arg(initiator);
+            setBigInfo("Вы оставили роли без обмена.");
         }
-        setBigInfo(msg);
-        if (currentGameType_ == GameType::HumanVsAI) {
-            QMessageBox::information(this, "Правило обмена", msg);
-        }
+        return true;
     }
 
-    refreshBoardView();
-    updateStatusLabels();
-    updateGameTypeUiState();
-    updateSwapUiState();
-    autoPlayAiIfNeeded();
-    return true;
+    if (phase == OpeningPhase::Swap2_B_ChooseOption) {
+        QMessageBox msg(this);
+        msg.setWindowTitle("Открытие Swap2");
+        msg.setText("Выберите опцию:");
+        QAbstractButton* takeX = msg.addButton("Взять X", QMessageBox::AcceptRole);
+        QAbstractButton* takeO = msg.addButton("Взять O + доп. O", QMessageBox::AcceptRole);
+        QAbstractButton* placeTwo = msg.addButton("Поставить 2 и дать выбор", QMessageBox::AcceptRole);
+        QAbstractButton* cancel = msg.addButton(QMessageBox::Cancel);
+        msg.exec();
+        if (msg.clickedButton() == cancel) return false;
+        if (msg.clickedButton() == takeX) {
+            controller_.chooseSwap2Option(Swap2Option::TakeX);
+        } else if (msg.clickedButton() == takeO) {
+            controller_.chooseSwap2Option(Swap2Option::TakeO_AndPlaceExtraO);
+        } else if (msg.clickedButton() == placeTwo) {
+            controller_.chooseSwap2Option(Swap2Option::PlaceTwoAndGiveChoice);
+        }
+        syncHumanSideFromSeat();
+        return true;
+    }
+
+    if (phase == OpeningPhase::Swap2_A_FinalChooseSide) {
+        QMessageBox msg(this);
+        msg.setWindowTitle("Открытие Swap2");
+        msg.setText("Выберите сторону для игрока A:");
+        QAbstractButton* takeX = msg.addButton("Играть за X", QMessageBox::AcceptRole);
+        QAbstractButton* takeO = msg.addButton("Играть за O", QMessageBox::AcceptRole);
+        QAbstractButton* cancel = msg.addButton(QMessageBox::Cancel);
+        msg.exec();
+        if (msg.clickedButton() == cancel) return false;
+        controller_.chooseSwap2FinalSide(msg.clickedButton() == takeX ? Player::X : Player::O);
+        syncHumanSideFromSeat();
+        return true;
+    }
+
+    if (phase == OpeningPhase::Swap2P_B_ChooseSide) {
+        QMessageBox msg(this);
+        msg.setWindowTitle("Открытие Swap2+");
+        msg.setText("Выберите сторону для игрока B:");
+        QAbstractButton* takeX = msg.addButton("Играть за X", QMessageBox::AcceptRole);
+        QAbstractButton* takeO = msg.addButton("Играть за O", QMessageBox::AcceptRole);
+        QAbstractButton* cancel = msg.addButton(QMessageBox::Cancel);
+        msg.exec();
+        if (msg.clickedButton() == cancel) return false;
+        controller_.chooseSwap2PlusSideB(msg.clickedButton() == takeX ? Player::X : Player::O);
+        syncHumanSideFromSeat();
+        return true;
+    }
+
+    if (phase == OpeningPhase::Swap2P_A_FinalChooseSide) {
+        QMessageBox msg(this);
+        msg.setWindowTitle("Открытие Swap2+");
+        msg.setText("Выберите сторону для игрока A:");
+        QAbstractButton* takeX = msg.addButton("Играть за X", QMessageBox::AcceptRole);
+        QAbstractButton* takeO = msg.addButton("Играть за O", QMessageBox::AcceptRole);
+        QAbstractButton* cancel = msg.addButton(QMessageBox::Cancel);
+        msg.exec();
+        if (msg.clickedButton() == cancel) return false;
+        controller_.chooseSwap2PlusFinalSideA(msg.clickedButton() == takeX ? Player::X : Player::O);
+        syncHumanSideFromSeat();
+        return true;
+    }
+
+    return false;
 }
 
 void MainWindow::startAutoAIVsAIGame(bool autoMode)
@@ -830,7 +1022,40 @@ void MainWindow::startAutoAIVsAIGame(bool autoMode)
     bool memo  = ui->checkMemo->isChecked();
     int sleepMs = autoMode ? 60 : 600;
 
-    controller_.setOnAIMoveCallback([this, sleepMs, ticket](const Board& board, Player who, const MoveEvaluation& eval, const AIStatistics&) {if (ticket != sessionId_.load(std::memory_order_relaxed)) return; if (aiCancelFlag_.load(std::memory_order_relaxed)) return; QString whoText = QString("ИИ (%1)").arg(who == Player::X ? "X" : "O"); Coord mv = eval.move; int score = eval.score;  const bool moveInRange = (mv.row() >= 0 && mv.col() >= 0 && mv.row() < board.getRows() && mv.col() < board.getCols());  if (!moveInRange) {QMetaObject::invokeMethod(this, [this, whoText, ticket]() {if (ticket != sessionId_.load(std::memory_order_relaxed)) return; setBigInfo(QString("%1 применил правило обмена.").arg(whoText)); refreshBoardView(); updateStatusLabels(); }, Qt::QueuedConnection); if (sleepMs > 0) {QThread::msleep(static_cast<unsigned long>(sleepMs)); } return; }  QMetaObject::invokeMethod(this, [this, whoText, mv, score, ticket]() {if (ticket != sessionId_.load(std::memory_order_relaxed)) return; setLastMove(mv); updateAiMoveLabel(whoText, mv, QString::number(score)); refreshBoardView(); updateStatusLabels(); }, Qt::QueuedConnection); if (sleepMs > 0) {QThread::msleep(static_cast<unsigned long>(sleepMs)); } });
+    controller_.setOnAIMoveCallback(
+        [this, sleepMs, ticket](const Board& board, Player who, const MoveEvaluation& eval, const AIStatistics&) {
+            if (ticket != sessionId_.load(std::memory_order_relaxed)) return;
+            if (aiCancelFlag_.load(std::memory_order_relaxed)) return;
+            Coord mv = eval.move;
+            int score = eval.score;
+            const bool moveInRange =
+                (mv.row() >= 0 && mv.col() >= 0 && mv.row() < board.getRows() && mv.col() < board.getCols());
+            if (!moveInRange) {
+                QMetaObject::invokeMethod(this, [this, who, ticket]() {
+                    if (ticket != sessionId_.load(std::memory_order_relaxed)) return;
+                    QString whoText = QString("%1 (%2)")
+                                          .arg(seatLabel(controller_.seatForSide(who)))
+                                          .arg(sideLabel(who));
+                    setBigInfo(QString("%1 сделал выбор открытия.").arg(whoText));
+                    refreshBoardView();
+                    updateStatusLabels();
+                }, Qt::QueuedConnection);
+                if (sleepMs > 0) {
+                    QThread::msleep(static_cast<unsigned long>(sleepMs));
+                }
+                return;
+            }
+            QMetaObject::invokeMethod(this, [this, who, mv, score, ticket]() {
+                if (ticket != sessionId_.load(std::memory_order_relaxed)) return;
+                setLastMove(mv);
+                updateAiMoveLabel(who, mv, QString::number(score));
+                refreshBoardView();
+                updateStatusLabels();
+            }, Qt::QueuedConnection);
+            if (sleepMs > 0) {
+                QThread::msleep(static_cast<unsigned long>(sleepMs));
+            }
+        });
 
     int timeLimit = dynamicDepthMode_ ? ui->spinTimeLimit->value() * 1000 : -1;
 
@@ -891,7 +1116,7 @@ void MainWindow::onAiVsAiFinished()
                          .arg(result.finalScore)
                          .arg(cancelled ? " Остановлено пользователем." : "");
     if (!cancelled && controller_.swapUsed()) {
-        detailedStats_ += " Применено правило обмена.";
+        detailedStats_ += " В этой партии менялись стороны.";
     }
 
     setSettingsEnabled(true);
@@ -906,8 +1131,7 @@ void MainWindow::endCurrentGameEarly()
 {
     sessionId_.fetch_add(1, std::memory_order_relaxed);
     stopAllAi(true);
-    controller_.newGame(currentRows_, currentCols_, currentWinLength_, controller_.mode(), swapRuleEnabled_);
-    swapPromptShown_ = false;
+    controller_.newGame(currentRows_, currentCols_, currentWinLength_, controller_.mode(), openingRule_);
     refreshBoardView();
     updateStatusLabels();
     ui->labelStatus->setText("Игра не идёт");
@@ -936,15 +1160,49 @@ QString MainWindow::coordToHuman(int row, int col) const
     return QString("%1%2").arg(letters).arg(row + 1);
 }
 
-void MainWindow::updateAiMoveLabel(const QString& who, const Coord& move, const QString& scoreText)
+QString MainWindow::seatLabel(Seat seat) const
+{
+    return (seat == Seat::A) ? QStringLiteral("Игрок A") : QStringLiteral("Игрок B");
+}
+
+QString MainWindow::sideLabel(Player side) const
+{
+    return (side == Player::X) ? QStringLiteral("X") : QStringLiteral("O");
+}
+
+void MainWindow::updateTurnIndicator()
+{
+    if (!turnIndicatorLabel_) return;
+
+    if (controller_.isGameOver()) {
+        turnIndicatorLabel_->setText(QStringLiteral("«партия завершена»"));
+        return;
+    }
+
+    Player p = controller_.currentPlayer();
+    Seat seat = controller_.seatToMove();
+    QString whoText = QStringLiteral("«ходит %1 (%2)»")
+                          .arg(seatLabel(seat))
+                          .arg(sideLabel(p));
+    turnIndicatorLabel_->setText(whoText);
+}
+
+QString MainWindow::formatMoveLine(Player mover, const Coord& move, const QString& scoreText) const
 {
     QString coord = coordToHuman(move.row(), move.col());
-    QString smallText = scoreText.isEmpty()
-        ? QString("%1: %2").arg(who).arg(coord)
-        : QString("%1: %2 (оценка %3)").arg(who).arg(coord).arg(scoreText);
+    QString seatText = seatLabel(controller_.seatForSide(mover));
+    QString sideText = sideLabel(mover);
+    if (scoreText.isEmpty()) {
+        return QString("%1: %2 (%3)").arg(seatText, coord, sideText);
+    }
+    return QString("%1: %2 (%3, оценка %4)").arg(seatText, coord, sideText, scoreText);
+}
 
-    ui->labelAiMove->setText(smallText);
-    addRecentMove(who, move, scoreText);
+void MainWindow::updateAiMoveLabel(Player mover, const Coord& move, const QString& scoreText)
+{
+    QString line = formatMoveLine(mover, move, scoreText);
+    ui->labelAiMove->setText(line);
+    addRecentMove(mover, move, scoreText);
 }
 
 void MainWindow::setBigInfo(const QString& text)
@@ -968,13 +1226,9 @@ void MainWindow::refreshBigInfoDisplay()
     ui->labelBigInfo->setText(lines.join("\n"));
 }
 
-void MainWindow::addRecentMove(const QString& who, const Coord& move, const QString& scoreText)
+void MainWindow::addRecentMove(Player mover, const Coord& move, const QString& scoreText)
 {
-    QString coord = coordToHuman(move.row(), move.col());
-    QString line = scoreText.isEmpty()
-        ? QString("%1: %2").arg(who).arg(coord)
-        : QString("%1: %2 (оценка %3)").arg(who).arg(coord).arg(scoreText);
-
+    QString line = formatMoveLine(mover, move, scoreText);
     recentMoves_.prepend(line);
     while (recentMoves_.size() > 2) {
         recentMoves_.removeLast();
@@ -986,17 +1240,6 @@ void MainWindow::addRecentMove(const QString& who, const Coord& move, const QStr
 void MainWindow::setLastMove(const Coord& mv)
 {
     lastMove_ = mv;
-}
-
-int MainWindow::evaluatePositionFor(Player p, int depth, bool memo)
-{
-    Player opponent = (p == Player::X) ? Player::O : Player::X;
-    AIStatistics stats;
-    
-    const int maxEvalDepth = 4;
-    int cappedDepth = depth > maxEvalDepth ? maxEvalDepth : depth;
-    MoveEvaluation eval = controller_.findBestMove(opponent, cappedDepth, memo, stats);
-    return -eval.score;
 }
 
 void MainWindow::startAsyncHint(Player p, bool isEvaluation, const QString& moverLabel, const Coord& evalMove)
@@ -1012,11 +1255,8 @@ void MainWindow::startAsyncHint(Player p, bool isEvaluation, const QString& move
     hintCanceled_ = false;
 
     int depth = ui->spinDepth->value();
-    if (dynamicHintMode_) {
-        depth = depth < 12 ? 12 : depth;
-    }
     bool memo = ui->checkMemo->isChecked();
-    int timeLimit = dynamicHintMode_ ? hintTimeLimitMs_ : -1;
+    int timeLimit = -1;
 
     int ticket = hintTicket_;
     hintWatcher_.setFuture(QtConcurrent::run([this, p, depth, memo, timeLimit, ticket]() {AiSearchResult out; MoveEvaluation bestSoFar(Coord(-1, -1), std::numeric_limits<int>::min()); AIStatistics stats;  out.result = controller_.findBestMove(p, depth, memo, stats, &bestSoFar, &hintCancelFlag_, timeLimit); out.best   = bestSoFar; out.stats  = stats; out.cancelled = hintCancelFlag_.load(std::memory_order_relaxed);  if (ticket != sessionId_.load(std::memory_order_relaxed)) {out.result = MoveEvaluation(Coord(-1, -1), std::numeric_limits<int>::min()); out.best   = out.result; } return out; }));
@@ -1047,7 +1287,7 @@ void MainWindow::showPopupMessage(const QString& text, QMessageBox::Icon icon)
 
 bool MainWindow::isMoveValid(const MoveEvaluation& mv) const
 {
-    const Board& b = controller_.board();
+    Board b = controller_.boardSnapshot();
     int rows = b.getRows();
     int cols = b.getCols();
     if (mv.move.row() < 0 || mv.move.col() < 0 || mv.move.row() >= rows || mv.move.col() >= cols) return false;
@@ -1070,9 +1310,10 @@ void MainWindow::startAsyncAiMove(Player aiPlayer)
     }
     bool memo  = ui->checkMemo->isChecked();
     int  timeLimit = dynamicDepthMode_ ? ui->spinTimeLimit->value() * 1000 : -1;
+    Seat seat = controller_.seatToMove();
 
     int ticket = aiSearchTicket_;
-    aiWatcher_.setFuture(QtConcurrent::run([this, aiPlayer, depth, memo, timeLimit, ticket]() {AiSearchResult out; MoveEvaluation bestSoFar(Coord(-1, -1), std::numeric_limits<int>::min()); AIStatistics stats;  out.result = controller_.findBestMove(aiPlayer, depth, memo, stats, &bestSoFar, &aiCancelFlag_, timeLimit); out.best   = bestSoFar; out.stats  = stats; out.cancelled = aiCancelFlag_.load(std::memory_order_relaxed);  if (ticket != sessionId_.load(std::memory_order_relaxed)) {out.result = MoveEvaluation(Coord(-1, -1), std::numeric_limits<int>::min()); out.best   = out.result; } return out; }));
+    aiWatcher_.setFuture(QtConcurrent::run([this, seat, aiPlayer, depth, memo, timeLimit, ticket]() {AiSearchResult out; MoveEvaluation bestSoFar(Coord(-1, -1), std::numeric_limits<int>::min()); AIStatistics stats;  out.result = controller_.findBestMoveForSeat(seat, aiPlayer, depth, memo, stats, &bestSoFar, &aiCancelFlag_, timeLimit); out.best   = bestSoFar; out.stats  = stats; out.cancelled = aiCancelFlag_.load(std::memory_order_relaxed);  if (ticket != sessionId_.load(std::memory_order_relaxed)) {out.result = MoveEvaluation(Coord(-1, -1), std::numeric_limits<int>::min()); out.best   = out.result; } return out; }));
 
     ui->btnCancelAi->setEnabled(true);
     ui->labelStatus->setText("Игра идёт");
@@ -1105,8 +1346,7 @@ void MainWindow::onAiSearchFinished()
     }
     setLastMove(chosen.move);
 
-    QString who = QString("ИИ (%1)").arg(aiSearchPlayer_ == Player::X ? "X" : "O");
-    updateAiMoveLabel(who, chosen.move, QString::number(chosen.score));
+    updateAiMoveLabel(aiSearchPlayer_, chosen.move, QString::number(chosen.score));
     refreshBoardView();
     updateStatusLabels();
 
@@ -1116,9 +1356,9 @@ void MainWindow::onAiSearchFinished()
     if (dynamicDepthMode_) {
         depthNote = QString(" Достигнутая глубина: %1.").arg(pack.stats.completedDepth);
     }
-
-    detailedStats_ = QString("Ход ИИ %1: %2 (оценка %3). Узлов %4, кеш hits %5, время %6 мс.%7%8")
-                         .arg(aiSearchPlayer_ == Player::X ? "X" : "O")
+    detailedStats_ = QString("Ход %1 (%2): %3 (оценка %4). Узлов %5, кеш hits %6, время %7 мс.%8%9")
+                         .arg(seatLabel(controller_.seatForSide(aiSearchPlayer_)))
+                         .arg(sideLabel(aiSearchPlayer_))
                          .arg(coord)
                          .arg(chosen.score)
                          .arg(static_cast<qulonglong>(pack.stats.nodesVisited))
@@ -1132,6 +1372,7 @@ void MainWindow::onAiSearchFinished()
         showGameOverMessage();
     } else {
         ui->labelStatus->setText("Игра идёт");
+        autoPlayAiIfNeeded();
     }
 }
 
@@ -1157,53 +1398,32 @@ void MainWindow::onHintFinished()
         return;
     }
 
-    QString depthNote;
-    if (dynamicHintMode_) {
-        depthNote = QString(" Достигнутая глубина: %1.").arg(pack.stats.completedDepth);
-    }
-
     if (currentHintTask_ == HintTask::Hint) {
-        QString who = (hintPlayer_ == Player::X) ? "X" : "O";
-        QString coord = coordToHuman(chosen.move.row(), chosen.move.col());
-        QString text = QString("Рекомендация (%1): %2 (оценка %3).%4")
-                           .arg(who)
-                           .arg(coord)
-                           .arg(chosen.score)
-                           .arg(depthNote);
+        QString line = formatMoveLine(hintPlayer_, chosen.move, QString::number(chosen.score));
+        QString text = QString("Рекомендация: %1.").arg(line);
 
-        detailedStats_ = QString("Подсказка (%1): %2 (оценка %3). Узлов %4, сгенерировано %5, кеш hits %6, misses %7, время %8 мс.%9")
-                             .arg(who)
-                             .arg(coord)
-                             .arg(chosen.score)
+        detailedStats_ = QString("Подсказка: %1. Узлов %2, сгенерировано %3, кеш hits %4, misses %5, время %6 мс.")
+                             .arg(line)
                              .arg(static_cast<qulonglong>(pack.stats.nodesVisited))
                              .arg(static_cast<qulonglong>(pack.stats.nodesGenerated))
                              .arg(static_cast<qulonglong>(pack.stats.cacheHits))
                              .arg(static_cast<qulonglong>(pack.stats.cacheMisses))
-                             .arg(static_cast<long long>(pack.stats.timeMs))
-                             .arg(depthNote);
+                             .arg(static_cast<long long>(pack.stats.timeMs));
 
         setBigInfo(text);
         showPopupMessage(text, QMessageBox::Information);
     } else if (currentHintTask_ == HintTask::HumanEval) {
         
         int scoreForMover = -chosen.score;
-        QString mover = evalMoverLabel_.isEmpty() ? QStringLiteral("Ваш ход") : evalMoverLabel_;
-        QString coord = coordToHuman(evalMoveForHint_.row(), evalMoveForHint_.col());
-        QString text = QString("%1 %2: оценка %3.%4")
-                           .arg(mover)
-                           .arg(coord)
-                           .arg(scoreForMover)
-                           .arg(depthNote);
-        detailedStats_ = QString("Оценка хода %1: %2 (score %3). Узлов %4, сгенерировано %5, кеш hits %6, misses %7, время %8 мс.%9")
-                             .arg(mover)
-                             .arg(coord)
-                             .arg(scoreForMover)
+        QString line = formatMoveLine(evalMoverSide_, evalMoveForHint_, QString::number(scoreForMover));
+        QString text = QString("%1.").arg(line);
+        detailedStats_ = QString("Оценка хода: %1. Узлов %2, сгенерировано %3, кеш hits %4, misses %5, время %6 мс.")
+                             .arg(line)
                              .arg(static_cast<qulonglong>(pack.stats.nodesVisited))
                              .arg(static_cast<qulonglong>(pack.stats.nodesGenerated))
                              .arg(static_cast<qulonglong>(pack.stats.cacheHits))
                              .arg(static_cast<qulonglong>(pack.stats.cacheMisses))
-                             .arg(static_cast<long long>(pack.stats.timeMs))
-                             .arg(depthNote);
+                             .arg(static_cast<long long>(pack.stats.timeMs));
         setBigInfo(text);
     }
 
@@ -1221,13 +1441,19 @@ void MainWindow::onHintFinished()
 
 void MainWindow::updateStatusLabels()
 {
+    syncHumanSideFromSeat();
+
     if (controller_.isGameOver()) {
         ui->labelCurrentPlayer->setText("-");
         setBigInfo("Партия завершена");
         updateGameStateLabel(false);
     } else {
         Player p = controller_.currentPlayer();
-        ui->labelCurrentPlayer->setText(p == Player::X ? "X" : "O");
+        Seat seat = controller_.seatToMove();
+        QString whoText = QStringLiteral("«ходит %1 (%2)»")
+                              .arg(seatLabel(seat))
+                              .arg(sideLabel(p));
+        ui->labelCurrentPlayer->setText(whoText);
         updateGameStateLabel(true);
     }
 
@@ -1236,17 +1462,18 @@ void MainWindow::updateStatusLabels()
         ui->labelLinesO->setText(QString::number(controller_.creditedLinesO()));
         ui->labelScore->setText(QString::number(controller_.score()));
     } else {
-        int linesX = GameController::countLinesFor(controller_.board(),
+        Board boardSnapshot = controller_.boardSnapshot();
+        int linesX = GameController::countLinesFor(boardSnapshot,
                                                    CellState::X);
-        int linesO = GameController::countLinesFor(controller_.board(),
+        int linesO = GameController::countLinesFor(boardSnapshot,
                                                    CellState::O);
         ui->labelLinesX->setText(QString::number(linesX));
         ui->labelLinesO->setText(QString::number(linesO));
         ui->labelScore->setText(QString::number(linesO - linesX));
     }
 
-    updateSwapUiState();
-    offerSwapToHumanIfNeeded();
+    updateOpeningUiState();
+    updateTurnIndicator();
 }
 
 
@@ -1254,7 +1481,7 @@ void MainWindow::updateStatusLabels()
 
 void MainWindow::showGameOverMessage()
 {
-    const Board& b = controller_.board();
+    Board b = controller_.boardSnapshot();
     QString msg;
 
     if (controller_.mode() == GameMode::Classic) {
@@ -1290,51 +1517,6 @@ void MainWindow::showGameOverMessage()
     updateGameStateLabel(false);
 }
 
-void MainWindow::offerSwapToHumanIfNeeded()
-{
-    if (swapPromptShown_) return;
-    if (!controller_.isSwapRuleEnabled()) return;
-    if (!controller_.isSwapAvailable()) return;
-    if (controller_.isGameOver()) return;
-
-    Player current = controller_.currentPlayer();
-    if (isPlayerAi(current)) return;
-
-    swapPromptShown_ = true;
-    QString question = QStringLiteral("Поменяться сторонами? После обмена вы будете играть за X, "
-                                      "оппонент за O. Ход по-прежнему остаётся за O.");
-    QMessageBox::StandardButton res = QMessageBox::question(
-        this,
-        QStringLiteral("Правило обмена"),
-        question,
-        QMessageBox::Yes | QMessageBox::No,
-        QMessageBox::No);
-
-    if (res == QMessageBox::Yes) {
-        applySwapIfPossible("Вы");
-    } else {
-        setBigInfo("Вы оставили роли без обмена.");
-    }
-}
-
-bool MainWindow::maybeAiTakesSwap()
-{
-    if (!controller_.isSwapRuleEnabled()) return false;
-    if (!controller_.isSwapAvailable()) return false;
-
-    Player current = controller_.currentPlayer();
-    if (!isPlayerAi(current)) return false;
-
-    int depth = ui->spinDepth->value();
-    bool memo = ui->checkMemo->isChecked();
-    bool swapped = controller_.maybeAutoSwapForCurrent(depth, memo, 0, &aiCancelFlag_);
-    if (swapped) {
-        applySwapIfPossible("ИИ", false, true);
-        return true;
-    }
-    return false;
-}
-
 void MainWindow::autoPlayAiIfNeeded()
 {
     if (hintInProgress_) return;
@@ -1343,12 +1525,16 @@ void MainWindow::autoPlayAiIfNeeded()
     if (aiVsAiStepMode_) return;
     if (controller_.isGameOver()) return;
     if (aiSearchInProgress_) return;
-    if (maybeAiTakesSwap()) return;
 
-    Player aiPlayer = humanIsX_ ? Player::O : Player::X;
-    if (controller_.currentPlayer() != aiPlayer) return;
+    if (resolveOpeningChoiceIfNeeded()) {
+        refreshBoardView();
+        updateStatusLabels();
+        if (controller_.isGameOver()) return;
+    }
+    if (isOpeningChoicePhase(controller_.openingPhase())) return;
+    if (!isCurrentSeatAi()) return;
 
-    startAsyncAiMove(aiPlayer);
+    startAsyncAiMove(controller_.currentPlayer());
 }
 
 
@@ -1381,10 +1567,22 @@ void MainWindow::handleBoardClick(int row, int col)
         return;
     }
 
-    Player aiPlayer = humanIsX_ ? Player::O : Player::X;
-    if (currentGameType_ == GameType::HumanVsAI &&
-        controller_.currentPlayer() == aiPlayer) {
-        showPopupMessage(QString("Сейчас ход ИИ %1. Нажмите \"Ход ИИ\" или включите автоход.") .arg(aiPlayer == Player::X ? "X" : "O"));
+    if (isOpeningChoicePhase(controller_.openingPhase())) {
+        if (resolveOpeningChoiceIfNeeded()) {
+            refreshBoardView();
+            updateStatusLabels();
+            autoPlayAiIfNeeded();
+        } else {
+            showPopupMessage("Сейчас требуется выбор открытия. Сделайте выбор.");
+        }
+        return;
+    }
+
+    if (currentGameType_ == GameType::HumanVsAI && isCurrentSeatAi()) {
+        Player aiPlayer = controller_.currentPlayer();
+        showPopupMessage(QString("Сейчас ход %1 (%2). Нажмите \"Ход ИИ\" или включите автоход.")
+                             .arg(seatLabel(controller_.seatForSide(aiPlayer)))
+                             .arg(sideLabel(aiPlayer)));
         return;
     }
 
@@ -1393,7 +1591,6 @@ void MainWindow::handleBoardClick(int row, int col)
     }
 
     Player mover = controller_.currentPlayer();
-
     MoveStatus st = controller_.applyMove(row, col);
     switch (st) {
     case MoveStatus::InvalidCell:
@@ -1410,11 +1607,8 @@ void MainWindow::handleBoardClick(int row, int col)
     }
 
     QString moveScore;
-    QString moverLabel = (currentGameType_ == GameType::HumanVsAI)
-                             ? QString("Вы (%1)").arg(mover == Player::X ? "X" : "O")
-                             : QString("Игрок %1").arg(mover == Player::X ? "X" : "O");
     setLastMove(Coord(row, col));
-    addRecentMove(moverLabel, Coord(row, col), moveScore);
+    addRecentMove(mover, Coord(row, col), moveScore);
     if (!hintLine_.isEmpty()) {
         hintLine_.clear();
         refreshBigInfoDisplay();
@@ -1423,18 +1617,10 @@ void MainWindow::handleBoardClick(int row, int col)
     refreshBoardView();
     updateStatusLabels();
 
-    bool evalStarted = false;
-    if (evaluateHumanMoves_) {
-        
-        Player opponent = (mover == Player::X) ? Player::O : Player::X;
-        startAsyncHint(opponent, true, moverLabel, Coord(row, col));
-        evalStarted = true;
-    }
-
     if (controller_.isGameOver()) {
         ui->labelStatus->setText("Игра не идёт");
         showGameOverMessage();
-    } else if (!evalStarted) {
+    } else {
         autoPlayAiIfNeeded();
     }
 }
@@ -1470,21 +1656,23 @@ void MainWindow::onNewGameClicked()
             ? GameMode::LinesScore
             : GameMode::Classic;
 
-    swapRuleEnabled_ = (mode == GameMode::LinesScore) &&
-                       (ui->checkSwapRule->checkState() != Qt::Unchecked);
+    if (ui->groupBoxAdvanced->isChecked()) {
+        applyAdvancedSettingsFromUi();
+    } else {
+        applyEnginePresetFromUi();
+    }
 
-    controller_.newGame(rows, cols, winLen, mode, swapRuleEnabled_);
+    openingRule_ = openingRuleFromUi();
+    controller_.setOpeningRule(openingRule_);
+    controller_.newGame(rows, cols, winLen, mode, openingRule_);
 
     currentGameType_    = gameTypeFromUI();
     currentAIVsAISpeed_ = aiVsAiSpeedFromUI();
     autoAiEnabled_      = ui->checkAutoAi->isChecked();
-    humanIsX_           = (ui->comboPlayerSide->currentIndex() == 0);
-    evaluateHumanMoves_ = ui->checkEvalHuman->isChecked();
+    humanSeat_          = (ui->comboPlayerSide->currentIndex() == 0) ? Seat::A : Seat::B;
+    syncHumanSideFromSeat();
     dynamicDepthMode_   = ui->checkDynamicDepth->isChecked();
-    dynamicHintMode_    = ui->checkHintDynamic->isChecked();
     timeLimitMs_        = ui->spinTimeLimit->value() * 1000;
-    hintTimeLimitMs_    = ui->spinHintTime->value() * 1000;
-    swapPromptShown_    = false;
     hintInProgress_     = false;
     hintCanceled_       = false;
     currentHintTask_    = HintTask::None;
@@ -1504,7 +1692,8 @@ void MainWindow::onNewGameClicked()
     refreshBigInfoDisplay();
     ui->labelAiMove->setText("-");
     updateGameStateLabel(true);
-    updateSwapUiState();
+    updateOpeningUiState();
+    showOpeningRuleInfoDialog();
 
     if (currentGameType_ == GameType::HumanVsHuman) {
         ui->labelStatus->setText("Игра идёт");
@@ -1512,10 +1701,6 @@ void MainWindow::onNewGameClicked()
     }
 
     if (currentGameType_ == GameType::HumanVsAI) {
-        QString aiSide = humanIsX_ ? "O" : "X";
-        QString humanSide = humanIsX_ ? "X" : "O";
-        QString starter = humanIsX_ ? QString("вы (%1)").arg(humanSide)
-                                    : QString("ИИ (%1)").arg("X");
         ui->labelStatus->setText("Игра идёт");
         autoPlayAiIfNeeded();
         return;
@@ -1547,17 +1732,23 @@ void MainWindow::onBestMoveClicked()
         return;
     }
 
-    Player aiPlayer = humanIsX_ ? Player::O : Player::X;
-    if (controller_.currentPlayer() != aiPlayer) {
-        showPopupMessage(QString("Сейчас не ход %1. Сначала сделайте ход %2.") .arg(aiPlayer == Player::X ? "X" : "O") .arg(aiPlayer == Player::X ? "O" : "X"));
+    if (isOpeningChoicePhase(controller_.openingPhase())) {
+        if (resolveOpeningChoiceIfNeeded()) {
+            refreshBoardView();
+            updateStatusLabels();
+            autoPlayAiIfNeeded();
+        } else {
+            showPopupMessage("Сейчас требуется выбор открытия. Сделайте выбор.");
+        }
         return;
     }
 
-    if (maybeAiTakesSwap()) {
+    if (!isCurrentSeatAi()) {
+        showPopupMessage("Сейчас ход игрока. Сначала сделайте ход, затем можно запросить ход ИИ.");
         return;
     }
 
-    startAsyncAiMove(aiPlayer);
+    startAsyncAiMove(controller_.currentPlayer());
 }
 
 
@@ -1573,7 +1764,11 @@ void MainWindow::onHintClicked()
         showPopupMessage("Подсказка недоступна в режиме AI vs AI.");
         return;
     }
-    if (isPlayerAi(controller_.currentPlayer())) {
+    if (isOpeningChoicePhase(controller_.openingPhase())) {
+        showPopupMessage("Сейчас требуется выбор открытия. Подсказка будет доступна после него.", QMessageBox::Information);
+        return;
+    }
+    if (isCurrentSeatAi()) {
         showPopupMessage("Сейчас ход ИИ. Подсказка будет доступна после его хода.", QMessageBox::Information);
         return;
     }
@@ -1640,40 +1835,11 @@ void MainWindow::onAivAiSpeedChanged(int index)
     updateGameTypeUiState();
 }
 
-void MainWindow::onSwapRuleToggled(Qt::CheckState state)
-{
-    swapRuleEnabled_ = (state != Qt::Unchecked) &&
-                       (controller_.mode() == GameMode::LinesScore);
-    updateSwapUiState();
-}
-
-void MainWindow::onSwapNowClicked()
-{
-    if (controller_.mode() != GameMode::LinesScore) {
-        showPopupMessage("Правило обмена доступно только в режиме по линиям.");
-        return;
-    }
-    if (!controller_.isSwapRuleEnabled()) {
-        showPopupMessage("Включите галочку \"Правило обмена\", чтобы его использовать.");
-        return;
-    }
-    if (!controller_.isSwapAvailable()) {
-        showPopupMessage("Обмен доступен только сразу после первого хода X.");
-        return;
-    }
-    applySwapIfPossible("Вы");
-}
-
 void MainWindow::onAutoAiToggled(Qt::CheckState state)
 {
     autoAiEnabled_ = (state != Qt::Unchecked);
     updateGameTypeUiState();
     autoPlayAiIfNeeded();
-}
-
-void MainWindow::onEvalHumanToggled(Qt::CheckState state)
-{
-    evaluateHumanMoves_ = (state != Qt::Unchecked);
 }
 
 void MainWindow::onDynamicDepthToggled(Qt::CheckState state)
@@ -1689,18 +1855,96 @@ void MainWindow::onTimeLimitChanged(int seconds)
     timeLimitMs_ = ui->spinTimeLimit->value() * 1000;
 }
 
-void MainWindow::onHintDynamicToggled(Qt::CheckState state)
+
+void MainWindow::applyEnginePresetFromUi()
 {
-    dynamicHintMode_ = (state != Qt::Unchecked);
-    ui->spinHintTime->setEnabled(dynamicHintMode_);
-    hintTimeLimitMs_ = ui->spinHintTime->value() * 1000;
+    EnginePreset preset =
+        (ui->comboEnginePreset->currentIndex() == 1)
+            ? EnginePreset::Strict
+            : EnginePreset::Fast;
+    controller_.setEnginePreset(preset, ui->spinBoardRows->value(), ui->spinBoardCols->value());
+    syncAdvancedSettingsUi(preset);
 }
 
-void MainWindow::onHintTimeChanged(int seconds)
+void MainWindow::applyAdvancedSettingsFromUi()
 {
-    Q_UNUSED(seconds);
-    hintTimeLimitMs_ = ui->spinHintTime->value() * 1000;
+    int modeIdx = ui->comboMoveGenMode->currentIndex();
+    MoveGenMode genMode = MoveGenMode::Hybrid;
+    if (modeIdx == 0) genMode = MoveGenMode::Full;
+    else if (modeIdx == 1) genMode = MoveGenMode::Frontier;
+    controller_.setMoveGenMode(genMode);
+    controller_.setUseLMR(ui->checkUseLmr->isChecked());
+    controller_.setUseExtensions(ui->checkUseExtensions->isChecked());
 }
+
+void MainWindow::syncAdvancedSettingsUi(EnginePreset preset)
+{
+    QSignalBlocker blockGen(ui->comboMoveGenMode);
+    QSignalBlocker blockLmr(ui->checkUseLmr);
+    QSignalBlocker blockExt(ui->checkUseExtensions);
+
+    MoveGenMode genMode = MoveGenMode::Hybrid;
+    bool lmr = true;
+    bool ext = true;
+    bool perfect = false;
+    controller_.getPresetSettings(preset, genMode, lmr, ext, perfect);
+    Q_UNUSED(perfect);
+    int area = ui->spinBoardRows->value() * ui->spinBoardCols->value();
+    if (preset == EnginePreset::Strict && area >= 64) {
+        genMode = MoveGenMode::Hybrid;
+        lmr = true;
+        ext = false;
+    }
+    int genIndex = 2;
+    if (genMode == MoveGenMode::Full) {
+        genIndex = 0;
+    } else if (genMode == MoveGenMode::Frontier) {
+        genIndex = 1;
+    }
+    ui->comboMoveGenMode->setCurrentIndex(genIndex);
+    ui->checkUseLmr->setChecked(lmr);
+    ui->checkUseExtensions->setChecked(ext);
+}
+
+void MainWindow::onEnginePresetChanged(int index)
+{
+    Q_UNUSED(index);
+    applyEnginePresetFromUi();
+}
+
+void MainWindow::onAdvancedToggled(bool checked)
+{
+    if (checked) {
+        applyAdvancedSettingsFromUi();
+    } else {
+        applyEnginePresetFromUi();
+    }
+}
+
+void MainWindow::onMoveGenModeChanged(int index)
+{
+    Q_UNUSED(index);
+    if (ui->groupBoxAdvanced->isChecked()) {
+        applyAdvancedSettingsFromUi();
+    }
+}
+
+void MainWindow::onUseLmrToggled(Qt::CheckState state)
+{
+    Q_UNUSED(state);
+    if (ui->groupBoxAdvanced->isChecked()) {
+        applyAdvancedSettingsFromUi();
+    }
+}
+
+void MainWindow::onUseExtensionsToggled(Qt::CheckState state)
+{
+    Q_UNUSED(state);
+    if (ui->groupBoxAdvanced->isChecked()) {
+        applyAdvancedSettingsFromUi();
+    }
+}
+
 
 void MainWindow::onAiVsAiStepFinished()
 {
@@ -1721,15 +1965,21 @@ void MainWindow::onAiVsAiStepFinished()
         return;
     }
 
-    QString who = (r.info.player == Player::X) ? "X" : "O";
-    QString whoLabel = QString("ИИ (%1)").arg(who);
+    Player who = r.info.player;
     const AIStatistics &s = r.info.stats;
 
     if (r.info.isSwap) {
-        
-        detailedStats_ = QString("ИИ (%1) применил правило обмена.").arg(who);
+        QString seatText = seatLabel(r.info.seat);
+        QString sideText = sideLabel(who);
+        QString action = r.info.action.empty()
+                             ? QStringLiteral("выбор открытия")
+                             : QString::fromStdString(r.info.action);
+        detailedStats_ = QString("%1 (%2) сделал выбор открытия: %3.")
+                             .arg(seatText)
+                             .arg(sideText)
+                             .arg(action);
         if (controller_.swapUsed()) {
-            detailedStats_ += " Правило обмена было применено в этой партии.";
+            detailedStats_ += " В этой партии менялись стороны.";
         }
         setBigInfo(detailedStats_);
         ui->labelStatus->setText("Игра идёт");
@@ -1738,29 +1988,24 @@ void MainWindow::onAiVsAiStepFinished()
         refreshBoardView();
         updateStatusLabels();
     } else {
-        QString depthNote;
-        if (dynamicDepthMode_) {
-            depthNote = QString(" Достигнутая глубина: %1.").arg(s.completedDepth);
-        }
-
         detailedStats_ = QString(
-                             "ИИ (%1) ход %2 (оценка %3). Узлов %4, сгенерировано %5, кеш hits %6, misses %7, время %8 мс.%9")
-                             .arg(who)
+                             "%1 (%2) ход %3 (оценка %4). Узлов %5, сгенерировано %6, кеш hits %7, misses %8, время %9 мс.")
+                             .arg(seatLabel(r.info.seat))
+                             .arg(sideLabel(who))
                              .arg(coordToHuman(r.info.move.row(), r.info.move.col()))
                              .arg(r.info.evalScore)
                              .arg(static_cast<qulonglong>(s.nodesVisited))
                              .arg(static_cast<qulonglong>(s.nodesGenerated))
                              .arg(static_cast<qulonglong>(s.cacheHits))
                              .arg(static_cast<qulonglong>(s.cacheMisses))
-                             .arg(static_cast<long long>(s.timeMs))
-                             .arg(depthNote);
+                             .arg(static_cast<long long>(s.timeMs));
         if (controller_.swapUsed()) {
-            detailedStats_ += " Правило обмена было применено в этой партии.";
+            detailedStats_ += " В этой партии менялись стороны.";
         }
 
         
         setLastMove(r.info.move);
-        updateAiMoveLabel(whoLabel, r.info.move, QString::number(r.info.evalScore));
+        updateAiMoveLabel(who, r.info.move, QString::number(r.info.evalScore));
 
         refreshBoardView();
         updateStatusLabels();
@@ -1821,8 +2066,9 @@ void MainWindow::onShowStatsClicked()
         linesO = controller_.creditedLinesO();
         score  = controller_.score();
     } else {
-        linesX = GameController::countLinesFor(controller_.board(), CellState::X);
-        linesO = GameController::countLinesFor(controller_.board(), CellState::O);
+        Board boardSnapshot = controller_.boardSnapshot();
+        linesX = GameController::countLinesFor(boardSnapshot, CellState::X);
+        linesO = GameController::countLinesFor(boardSnapshot, CellState::O);
         score  = linesO - linesX;
     }
 

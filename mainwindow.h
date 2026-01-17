@@ -9,6 +9,7 @@
 #include <QKeyEvent>
 #include <QStringList>
 #include <QMessageBox>
+#include <QLabel>
 #include <QFuture>
 #include <QFutureWatcher>
 #include <atomic>
@@ -63,24 +64,33 @@ private:
     void onAiVsAiFinished();
     void onAiVsAiStepFinished();
     QString coordToHuman(int row, int col) const;
-    void updateAiMoveLabel(const QString& who, const Coord& move, const QString& scoreText = QString());
+    void updateAiMoveLabel(Player mover, const Coord& move, const QString& scoreText = QString());
     void setBigInfo(const QString& text);
     void refreshBigInfoDisplay();
-    void addRecentMove(const QString& who, const Coord& move, const QString& scoreText);
+    void addRecentMove(Player mover, const Coord& move, const QString& scoreText);
     void setLastMove(const Coord& mv);
-    int evaluatePositionFor(Player p, int depth, bool memo);
     void startAsyncHint(Player p, bool isEvaluation, const QString& moverLabel, const Coord& evalMove);
-    void offerSwapToHumanIfNeeded();
     void updateGameStateLabel(bool running);
     void showPopupMessage(const QString& text, QMessageBox::Icon icon = QMessageBox::Warning);
     void startAsyncAiMove(Player aiPlayer);
     void onAiSearchFinished();
-    void updateSwapUiState();
-    bool applySwapIfPossible(const QString& initiator, bool silent = false, bool alreadyApplied = false);
-    bool maybeAiTakesSwap();
     bool isPlayerAi(Player p) const;
+    bool isSeatAi(Seat seat) const;
+    bool isCurrentSeatAi() const;
     bool isMoveValid(const MoveEvaluation& mv) const;
     void stopAllAi(bool resetCancelFlag = false);
+    void applyEnginePresetFromUi();
+    void applyAdvancedSettingsFromUi();
+    void syncAdvancedSettingsUi(EnginePreset preset);
+    void syncHumanSideFromSeat();
+    bool resolveOpeningChoiceIfNeeded();
+    void updateOpeningUiState();
+    OpeningRule openingRuleFromUi() const;
+    void showOpeningRuleInfoDialog();
+    QString formatMoveLine(Player mover, const Coord& move, const QString& scoreText) const;
+    QString seatLabel(Seat seat) const;
+    QString sideLabel(Player side) const;
+    void updateTurnIndicator();
 
 private slots:
     void onNewGameClicked();
@@ -93,16 +103,17 @@ private slots:
     void onAutoAiToggled(Qt::CheckState state);
     void onEndGameClicked();
     void onHintClicked();
-    void onEvalHumanToggled(Qt::CheckState state);
     void onShowStatsClicked();
     void onCancelAiClicked();
-    void onSwapRuleToggled(Qt::CheckState state);
-    void onSwapNowClicked();
     void onDynamicDepthToggled(Qt::CheckState state);
     void onTimeLimitChanged(int seconds);
-    void onHintDynamicToggled(Qt::CheckState state);
-    void onHintTimeChanged(int seconds);
     void onHintFinished();
+    void onEnginePresetChanged(int index);
+    void onAdvancedToggled(bool checked);
+    void onMoveGenModeChanged(int index);
+    void onUseLmrToggled(Qt::CheckState state);
+    void onUseExtensionsToggled(Qt::CheckState state);
+    void onOpeningRuleChanged(int index);
 
 private:
     class AiSearchResult {
@@ -158,10 +169,7 @@ private:
     AIVsAISpeed currentAIVsAISpeed_ = AIVsAISpeed::Automatic;
     bool autoAiEnabled_ = true;
     bool humanIsX_ = true;
-    bool evaluateHumanMoves_ = false;
     bool dynamicDepthMode_ = false;
-    bool dynamicHintMode_ = false;
-    int  hintTimeLimitMs_ = 10000;
     int  timeLimitMs_ = 8000;
     QStringList recentMoves_;
     QString hintLine_;
@@ -170,6 +178,7 @@ private:
     bool hintInProgress_ = false;
     Player aiSearchPlayer_ = Player::O;
     Player hintPlayer_ = Player::O;
+    Player evalMoverSide_ = Player::X;
     HintTask currentHintTask_ = HintTask::None;
     Coord evalMoveForHint_ = Coord(-1, -1);
     QString evalMoverLabel_;
@@ -187,8 +196,9 @@ private:
     int hintTicket_ = 0;
     int aiVsAiTicket_ = 0;
     int aiVsAiStepTicket_ = 0;
-    bool swapRuleEnabled_ = false;
-    bool swapPromptShown_ = false;
+    OpeningRule openingRule_ = OpeningRule::None;
+    Seat humanSeat_ = Seat::A;
+    QLabel* turnIndicatorLabel_ = nullptr;
 };
 
 #endif
