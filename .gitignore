@@ -10,3 +10,4 @@ CMakeCache.txt
 .qtc_clangd/
 
 tictactoe/
+.idea/
